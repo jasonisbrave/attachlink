@@ -151,3 +151,4 @@
 - **内容基线 SHA-256**（2026-11-18 深夜追加）：生命周期 12 断言 PASS（`scripts\test-hash.ps1`）；哈希正确性对拍：VBA WinCrypt CAPI ≡ PowerShell Get-FileHash（7777 字节随机二进制 MATCH）；迁移/看门狗回归 PASS。落地过程即根因 #15/#16（Declare 位置 / CAPI 三坑），oracle 会诊记录见第八节排查小抄上方
 - 机器级 Program Files 副本 2026-11-18 23:24 已与 dist/用户级三处哈希对齐（含归档迁移+内容基线终版）
 - **用户真实环境确认（2026-11-18 深夜）**：① 本地冲突实验通过——故意替换附件后体检正确红字「■ 内容变更」；② 企业网盘同步后在 **Mac** 上成功同步并查看附件（相对链接跨平台可读的实证；官方口径仍为仅支持 Windows 桌面版，Mac 记录为已观察行为）；③ 同事端体检与故意冲突实验留待次日实测
+- **v1.0.0 发布（2026-11-19）**：独立仓库 `jasonisbrave/attachlink`（22 文件首提交 + LICENSE 合并 + About/topics）；GitHub Release `v1.0.0` 附 `AttachLink-1.0.0.zip`（10.9MB）及 zip/exe 双 SHA-256 校验值——正式分发走 Releases，网盘仅作同步载体

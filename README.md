@@ -106,6 +106,8 @@ powershell -ExecutionPolicy Bypass -File build\build.ps1
 
 双击 **`AttachLinkSetup.exe`**，按窗口按钮操作：标准安装（接收/归档同事）/ 鼎信诺管理员环境部署（编制机，弹 UAC）/ 两级卸载。正式交付包就两个文件：`AttachLinkSetup.exe` + `README.md`（由 `build\make-exe.ps1` 生成于 `release\AttachLink-<版本>\`，exe 内嵌全部所需文件）。
 
+> **正式分发渠道：[GitHub Releases](https://github.com/jasonisbrave/attachlink/releases)**（下载 `AttachLink-<版本>.zip`，发布说明内附 SHA-256 校验值；企业网盘仅作归档同步载体，不作安装包分发）。
+
 - **首次运行提示**：exe 未签名，Windows 可能弹「已保护你的电脑」——点「更多信息 → 仍要运行」
 - **zip 下载后**：建议先在 zip 属性页勾选「解除锁定」再解压（避免解压出的所有文件带阻塞标记）
 - 静默参数（自动化/高级用户）：`/install`、`/deploy-elevated`、`/uninstall`、`/uninstall-elevated`、`/selfcheck`
