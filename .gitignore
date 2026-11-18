@@ -1,0 +1,15 @@
+# 构建产物（可由 build.ps1 / make-exe.ps1 重建）
+dist/
+build/exe-build/
+build/exe-dist/
+release/
+
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller 副产物
+AttachLinkSetup.spec
+
+# 本机环境
+*.log
