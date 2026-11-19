@@ -43,6 +43,27 @@ def log_file_path() -> str:
     return os.path.join(os.environ.get("TEMP", "."), "AttachLinkSetup.log")
 
 
+def exe_dir() -> str:
+    """安装器 exe 所在目录（分发 zip 的解压文件夹）"""
+    if hasattr(sys, "frozen"):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def save_log_beside_exe(text: str, extra_note: str = "") -> str:
+    """把日志快照另存到安装器所在目录（AttachLinkSetup.log，覆盖写），返回目标路径。
+    目标不可写时静默失败返回空串（提示回落到 %TEMP% 路径）。"""
+    target = os.path.join(exe_dir(), "AttachLinkSetup.log")
+    try:
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(text)
+            if extra_note:
+                f.write("\n" + extra_note + "\n")
+        return target
+    except OSError:
+        return ""
+
+
 def append_log_file(text: str) -> None:
     try:
         with open(log_file_path(), "a", encoding="utf-8") as f:
@@ -102,7 +123,7 @@ class App:
         self.root.minsize(640, 420)
         self._build_ui()
         self.root.after(100, self._drain_queue)
-        self.log(f"AttachLink v{self.ver}　|　安装日志：{log_file_path()}")
+        self.log(f"AttachLink v{self.ver}　|　每次操作结束后，日志快照会另存到本安装器所在文件夹（AttachLinkSetup.log），便于传递排查")
 
     # ---------------- UI ----------------
     def _build_ui(self) -> None:
@@ -180,9 +201,36 @@ class App:
             while True:
                 item = self.outq.get_nowait()
                 if isinstance(item, tuple) and item and item[0] == "__DONE__":
+                    code = item[1]
                     for b in self.buttons.values():
                         b.configure(state="normal")
-                    self.status.configure(text="完成" if item[1] == 0 else "失败（见日志）")
+                    # 日志快照另存到安装器所在目录，便于同事直接找到并转发
+                    beside = save_log_beside_exe(self.logbox.get("1.0", "end-1c"))
+                    if code == 0:
+                        self.status.configure(text="✓ 操作成功——安装/卸载已完成", foreground="#1a7f37")
+                        self.log("\n══════════ 操作成功 ══════════\n")
+                        import tkinter.messagebox as mb
+                        mb.showinfo(
+                            "AttachLink 安装器",
+                            "操作成功，安装（卸载）已完成。\n\n"
+                            "请【完全退出并重新打开 Excel】后使用。\n"
+                            "（编制机：管理员鼎信诺内使用还需另行执行\n"
+                            "「鼎信诺管理员环境部署」）",
+                            parent=self.root,
+                        )
+                    else:
+                        hint = {2: "请先关闭所有 Excel（含鼎信诺）后重试", 3: "安装包不完整，请联系分发人"}.get(code, "")
+                        where = ("日志已保存到安装器所在文件夹：\n" + beside if beside
+                                 else "日志文件（%TEMP%）：\n" + log_file_path())
+                        self.status.configure(text="✗ 操作失败（退出码 %d）——日志已另存到安装目录" % code, foreground="#c62828")
+                        self.log("\n══════════ 操作失败（退出码 %d）══════════\n日志快照：%s\n" % (code, beside or log_file_path()))
+                        import tkinter.messagebox as mb
+                        mb.showerror(
+                            "AttachLink 安装器",
+                            "操作失败（退出码 %d）。\n%s\n\n%s\n请把该文件发送给分发人排查。"
+                            % (code, hint + ("\n" if hint else ""), where),
+                            parent=self.root,
+                        )
                 else:
                     self.log(item)
         except queue.Empty:
@@ -229,6 +277,15 @@ def run_silent(mode: str) -> int:
     if proc.stderr:
         emit("[stderr] " + proc.stderr)
     print(f"[AttachLinkSetup] 退出码 {proc.returncode}；完整日志：{logf}")
+    # 日志快照另存到 exe 所在目录（方便传递给分发人；目标不可写则跳过）
+    try:
+        with open(logf, encoding="utf-8") as f:
+            full_log = f.read()
+    except OSError:
+        full_log = proc.stdout
+    beside = save_log_beside_exe(full_log, f"[silent {mode} exit={proc.returncode}]")
+    if beside:
+        print(f"[AttachLinkSetup] 日志快照已另存：{beside}")
     return proc.returncode
 
 

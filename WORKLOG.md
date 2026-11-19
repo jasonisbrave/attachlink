@@ -108,6 +108,8 @@
 
 ## 八、待办（接手即做）
 
+**流程约定（2026-11-19 用户定）**：版本发布（GitHub Release 创建/资产更新 + git commit/push）必须先经用户确认，不得自行发布。
+
 已完成（2026-11-18 深夜）：~~1 修看门狗~~✅、~~3 清理 COM 残留~~✅、~~4 README 重写~~✅、~~提权部署 install-elevated~~✅（管理员运行成功：Program Files + 计划任务 + HKLM 信任位置；任务看门狗已常驻，日志持续刷新）。
 
 **提权附着终验已过**：以管理员自动化拉起 Excel（鼎信诺等价场景）→ 基线无菜单 → 计划任务看门狗（Highest）40 秒内完成装载 → 菜单在位 + SelfTest=True。证据：`%TEMP%\opencode\elevated-attach-test.log`（RESULT: PASS）。

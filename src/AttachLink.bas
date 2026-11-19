@@ -42,8 +42,9 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 ' 附件清单工作表名
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
-' 1.1.0：附件版本更新（受控更替留痕，区分版本更替与篡改）；基线格式 v2（含版本与时间）
-Public Const ATTACHLINK_VERSION As String = "1.1.0"
+' 1.1.1：安装器 UX——成功弹窗明确「安装成功，重启 Excel 生效」；失败自动打开日志文件
+' ⚠ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
+Public Const ATTACHLINK_VERSION As String = "1.1.1"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"
