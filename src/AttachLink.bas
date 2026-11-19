@@ -42,7 +42,8 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 ' 附件清单工作表名
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
-Public Const ATTACHLINK_VERSION As String = "1.0.0"
+' 1.1.0：附件版本更新（受控更替留痕，区分版本更替与篡改）；基线格式 v2（含版本与时间）
+Public Const ATTACHLINK_VERSION As String = "1.1.0"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"
@@ -135,6 +136,11 @@ Private Sub RegisterMenu(ByVal adding As Boolean)
         Set btn = cb.Controls.Add(msoControlButton, , , 4, True)
         btn.Caption = "归档迁移（批量）"
         btn.OnAction = "AttachLink_ArchiveMigrate"
+        btn.Tag = MENU_TAG
+
+        Set btn = cb.Controls.Add(msoControlButton, , , 5, True)
+        btn.Caption = "附件版本更新"
+        btn.OnAction = "AttachLink_UpdateVersion"
         btn.Tag = MENU_TAG
     End If
 End Sub
@@ -286,20 +292,20 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
     wsIdx.Cells.Clear
 
     ' 标题与表头
-    With wsIdx.Range("A1:F1")
+    With wsIdx.Range("A1:G1")
         .Merge
         .Cells(1, 1).Value = "附件清单 —— " & wb.Name
         .Cells(1, 1).Font.Bold = True
         .Cells(1, 1).Font.Size = 14
     End With
     wsIdx.Range("A2").Value = "生成时间：" & Format(Now, "yyyy-mm-dd hh:nn")
-    wsIdx.Range("A3:F3").Value = Array("编号", "附件名", "相对路径", "所在位置", "状态", "内容基线")
+    wsIdx.Range("A3:G3").Value = Array("编号", "附件名", "相对路径", "所在位置", "状态", "内容基线", "更替记录")
 
     Dim ws As Worksheet, hl As Hyperlink
     Dim r As Long, total As Long, brokenCnt As Long, changedCnt As Long, unavailCnt As Long
     Dim cnt As Long, g As Long
     Dim linkPath As String, ok As Boolean
-    Dim h As String, key As String, cellF As String
+    Dim h As String, key As String, cellF As String, cellG As String, meta() As String
 
     r = 4
     For Each ws In wb.Worksheets
@@ -310,7 +316,7 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
             Next hl
             If cnt > 0 Then
                 ' 分组标题行
-                With wsIdx.Range(wsIdx.Cells(r, 1), wsIdx.Cells(r, 6))
+                With wsIdx.Range(wsIdx.Cells(r, 1), wsIdx.Cells(r, 7))
                     .Merge
                     .Cells(1, 1).Value = ws.Name & "（" & cnt & " 个附件）"
                     .Cells(1, 1).Font.Bold = True
@@ -330,7 +336,7 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
                         If ok Then
                             wsIdx.Cells(r, 5).Value = "正常"
                             wsIdx.Cells(r, 5).Font.Color = RGB(0, 128, 0)
-                            ' 内容基线校验（SHA-256）
+                            ' 内容基线校验（SHA-256；值=哈希|版本|登记时间|更新时间）
                             h = Sha256File(linkPath)
                             ' 键=附件夹内相对子路径；指向外部附件夹的链接
                             ' （迁移前形态）按文件名兜底
@@ -339,19 +345,29 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
                             Else
                                 key = LCase$(fso.GetFileName(linkPath))
                             End If
+                            cellG = ""
                             If Len(h) = 0 Then
                                 cellF = "校验不可用"
                                 unavailCnt = unavailCnt + 1
                             ElseIf Not base.Exists(key) Then
-                                base.Add key, h
+                                base.Add key, h & "|1|" & Format$(Now, "yyyy-mm-dd hh:nn") & "|" & Format$(Now, "yyyy-mm-dd hh:nn")
                                 baseDirty = True
-                                cellF = "已登记基线"
-                            ElseIf StrComp(base(key), h, vbTextCompare) = 0 Then
-                                cellF = "一致"
+                                cellF = "已登记 v1"
                             Else
-                                ' 不更新基线：持续警示，直到人工删除基线文件重建
-                                cellF = "■ 内容变更"
-                                changedCnt = changedCnt + 1
+                                meta = Split(base(key), "|")
+                                If StrComp(meta(0), h, vbTextCompare) = 0 Then
+                                    cellF = "一致 v" & meta(1)
+                                Else
+                                    ' 不更新基线：持续警示，直到走「附件版本更新」或人工重建基线
+                                    cellF = "■ 内容变更"
+                                    changedCnt = changedCnt + 1
+                                End If
+                                ' 更替记录：版本 >=2 的附件显式备注最近一次替换动作（审计留痕）
+                                If IsNumeric(meta(1)) Then
+                                    If CLng(meta(1)) >= 2 Then
+                                        cellG = "v" & (CLng(meta(1)) - 1) & "→v" & meta(1) & " " & meta(3)
+                                    End If
+                                End If
                             End If
                         Else
                             wsIdx.Cells(r, 5).Value = "断链"
@@ -363,8 +379,12 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
                         If cellF = "■ 内容变更" Then
                             wsIdx.Cells(r, 6).Font.Color = RGB(192, 0, 0)
                             wsIdx.Cells(r, 6).Font.Bold = True
-                        ElseIf cellF = "一致" Or cellF = "已登记基线" Then
+                        ElseIf Left$(cellF, 2) = "一致" Or Left$(cellF, 3) = "已登记" Then
                             wsIdx.Cells(r, 6).Font.Color = RGB(0, 128, 0)
+                        End If
+                        If Len(cellG) > 0 Then
+                            wsIdx.Cells(r, 7).Value = cellG
+                            wsIdx.Cells(r, 7).Font.Color = RGB(0, 102, 204)
                         End If
                         total = total + 1
                         g = g + 1
@@ -396,9 +416,10 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
         .Columns("D").ColumnWidth = 26
         .Columns("E").ColumnWidth = 8
         .Columns("F").ColumnWidth = 12
-        .Range("A3:F3").Font.Bold = True
-        .Range("A3:F3").Interior.Color = RGB(237, 237, 237)
-        If r > 4 Then .Range("A3:F" & (r - 1)).Borders.LineStyle = xlContinuous
+        .Columns("G").ColumnWidth = 24
+        .Range("A3:G3").Font.Bold = True
+        .Range("A3:G3").Interior.Color = RGB(237, 237, 237)
+        If r > 4 Then .Range("A3:G" & (r - 1)).Borders.LineStyle = xlContinuous
     End With
 
     Application.ScreenUpdating = True
@@ -410,8 +431,9 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
     Else
         msg = "附件清单已更新：共 " & total & " 个附件，正常 " & (total - brokenCnt) & "，断链 " & brokenCnt
         If changedCnt > 0 Then
-            msg = msg & "，内容变更 " & changedCnt & " 个（红字标注——附件被替换/篡改/同步同名覆盖）。" & vbCrLf & _
-                "如确为有意替换，删除附件夹内 " & BASELINE_FILE & " 后重新生成清单即可重建基线。"
+            msg = msg & "，内容变更 " & changedCnt & " 个（红字标注——未经「附件版本更新」流程的替换/篡改/同步同名覆盖）。" & vbCrLf & _
+                "如确为有意的版本更替，请选中该附件链接单元格，使用右键「附件版本更新」登记（留痕）；" & _
+                "全部重建基线才需删除附件夹内 " & BASELINE_FILE & " 后重新生成清单。"
         ElseIf brokenCnt > 0 Then
             msg = msg & "。可用右键菜单「附件断链修复」重连。"
         ElseIf unavailCnt > 0 Then
@@ -749,6 +771,119 @@ Fail:
         "已移动文件 " & movedCnt & " 个。"
 End Function
 
+'============================ 7. 附件版本更新 =========================
+' 场景：附件存在差错需要有意替换。直接覆盖会触发体检「■ 内容变更」红字
+' （无法与恶意替换区分）。本功能走受控更替流程：删除旧文件、写入新文件、
+' 基线版本 +1 并记录更替时间——体检显示「一致 vN」绿字，且清单「更替记录」
+' 列显式备注替换动作（审计留痕）。未经本流程的替换仍红字警示。
+' 用法：选中带附件链接的单元格 → 右键「附件版本更新」→ 选择新文件 → 确认。
+Public Sub AttachLink_UpdateVersion()
+    On Error GoTo Fail
+    Dim wb As Workbook
+    Set wb = ActiveWorkbook
+    If wb Is Nothing Then Exit Sub
+    If Len(wb.Path) = 0 Then
+        MsgBox "当前底稿尚未保存，无法定位附件文件夹。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+    If TypeName(Selection) <> "Range" Then
+        MsgBox "请先选中要更新版本的附件链接单元格。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    ' 取选区中第一个附件链接
+    Dim c As Range, hl As Hyperlink, target As Hyperlink
+    Set target = Nothing
+    For Each c In Selection.Cells
+        For Each hl In c.Hyperlinks
+            If IsAttachmentLink(hl, fso) Then Set target = hl: Exit For
+        Next hl
+        If Not target Is Nothing Then Exit For
+    Next c
+    If target Is Nothing Then
+        MsgBox "选区内未发现附件链接。请选中要更新版本的附件链接单元格。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+
+    Dim attachDir As String, fullPath As String, fName As String
+    attachDir = wb.Path & "\" & ATTACH_FOLDER_NAME
+    fullPath = ResolveLinkPath(fso, wb.Path, target.Address)
+    fName = fso.GetFileName(fullPath)
+    If StrComp(Left$(fullPath, Len(attachDir)), attachDir, vbTextCompare) <> 0 Then
+        MsgBox "该链接指向本底稿附件文件夹之外（可能是归档前的指回链接），请先完成归档迁移或断链修复。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+    If Not fso.FileExists(fullPath) Then
+        MsgBox "附件文件不存在（断链）：请先用「附件断链修复」恢复后再更新版本。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+
+    ' 基线必须已登记（版本号与历史来自基线）
+    Dim base As Object, key As String, meta() As String
+    Set base = LoadBaseline(fso, attachDir)
+    key = LCase$(Mid$(fullPath, Len(attachDir) + 2))
+    If Not base.Exists(key) Then
+        MsgBox "该附件尚未登记内容基线。请先运行「附件清单 / 体检」登记基线，再进行版本更新。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+    meta = Split(base(key), "|")
+    ' meta: 0=哈希 1=版本 2=登记时间 3=更新时间
+
+    ' 选择新文件
+    Dim fd As FileDialog
+    Set fd = Application.FileDialog(msoFileDialogFilePicker)
+    With fd
+        .Title = "选择替换「" & fName & "」的新版本文件（v" & (CLng(meta(1)) + 1) & "）"
+        .AllowMultiSelect = False
+        .Filters.Clear
+        .Filters.Add "所有文件", "*.*"
+        .InitialFileName = attachDir & "\"
+        If .Show <> -1 Then Exit Sub
+    End With
+    Dim newPath As String
+    newPath = fd.SelectedItems(1)
+    If StrComp(newPath, fullPath, vbTextCompare) = 0 Then
+        MsgBox "选择的还是当前附件本身，无需更替。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+
+    ' 内容相同无需更替
+    Dim hNew As String
+    hNew = Sha256File(newPath)
+    If Len(hNew) = 0 Then
+        MsgBox "新文件 SHA-256 校验不可用（读取失败），已取消。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+    If StrComp(hNew, meta(0), vbTextCompare) = 0 Then
+        MsgBox "新文件与当前版本（v" & meta(1) & "）内容完全相同，无需更替。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+
+    If MsgBox("附件版本更替确认：" & vbCrLf & vbCrLf & _
+              "附件：" & fName & vbCrLf & _
+              "版本：v" & meta(1) & " → v" & (CLng(meta(1)) + 1) & vbCrLf & _
+              "旧版本文件将被【删除】（更替动作将记入体检清单与基线，可留痕追溯）。" & vbCrLf & vbCrLf & _
+              "「是」执行更替　　「否」取消", vbYesNo + vbExclamation, "AttachLink 附件版本更新") <> vbYes Then Exit Sub
+
+    ' 文件操作全部成功后才写基线（避免中途失败造成状态不一致）
+    Dim tCreate As String
+    tCreate = meta(2)
+    If Len(tCreate) = 0 Then tCreate = Format$(Now, "yyyy-mm-dd hh:nn")
+    fso.DeleteFile fullPath, True
+    fso.CopyFile newPath, fullPath, False
+    base(key) = hNew & "|" & (CLng(meta(1)) + 1) & "|" & tCreate & "|" & Format$(Now, "yyyy-mm-dd hh:nn")
+    SaveBaseline fso, attachDir, base
+
+    MsgBox "附件版本更新完成：" & fName & " 已更替为 v" & (CLng(meta(1)) + 1) & "。" & vbCrLf & _
+           "链接地址不变（同名替换）。建议重新运行「附件清单 / 体检」核对。", vbInformation, "AttachLink"
+    Exit Sub
+Fail:
+    MsgBox "附件版本更新时出错（文件可能被占用，请关闭相关程序后重试；基线未被修改）：" & Err.Description, vbCritical, "AttachLink"
+End Sub
+
 '============================ 自检 ====================================
 ' 构建脚本用：确认模块可以编译
 Public Function AttachLink_SelfTest() As Boolean
@@ -813,7 +948,8 @@ Fail:
     Resume RelAll
 End Function
 
-' 读取内容基线为字典（键=附件夹内相对子路径小写，值=SHA-256）。
+' 读取内容基线为字典（键=附件夹内相对子路径小写，值=「哈希|版本|登记时间|更新时间」）。
+' 兼容旧 v1 格式（仅「路径|哈希」两字段）自动按版本 1 迁移。
 ' 基线不存在/损坏时返回空字典（不中断清单）
 Private Function LoadBaseline(ByVal fso As Object, ByVal attachDir As String) As Object
     Dim d As Object
@@ -823,7 +959,7 @@ Private Function LoadBaseline(ByVal fso As Object, ByVal attachDir As String) As
     p = attachDir & "\" & BASELINE_FILE
     If Not fso.FileExists(p) Then GoTo Done
     Dim stm As Object, text As String, lines() As String, i As Long
-    Dim line As String, parts() As String
+    Dim line As String, parts() As String, verS As String, tC As String, tU As String
     Set stm = CreateObject("ADODB.Stream")
     With stm
         .Type = 2                                   ' adTypeText
@@ -840,7 +976,13 @@ Private Function LoadBaseline(ByVal fso As Object, ByVal attachDir As String) As
         If Len(line) > 0 Then
             parts = Split(line, "|")
             If UBound(parts) >= 1 Then
-                If Len(parts(0)) > 0 And Len(parts(1)) > 0 Then d(LCase$(parts(0))) = parts(1)
+                verS = "1": tC = "": tU = ""
+                If UBound(parts) >= 4 Then
+                    verS = parts(2): tC = parts(3): tU = parts(4)
+                End If
+                If Len(parts(0)) > 0 And Len(parts(1)) > 0 And Len(verS) > 0 Then
+                    d(LCase$(parts(0))) = parts(1) & "|" & verS & "|" & tC & "|" & tU
+                End If
             End If
         End If
     Next i

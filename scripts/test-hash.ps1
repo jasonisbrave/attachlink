@@ -60,8 +60,8 @@ function Check($cond, $label) { if (-not $cond) { $script:ok = $false; "FAIL: $l
 $r1 = ColF $xl "$wbDir\main.xlsx"
 $r1.summary
 Check (Test-Path $baseline)                                '基线文件已生成'
-Check ($r1.vals["$attach\a.pdf"] -eq '已登记基线')          'a.pdf 登记基线'
-Check ($r1.vals["$attach\b.pdf"] -eq '已登记基线')          'b.pdf 登记基线'
+Check ($r1.vals["$attach\a.pdf"] -eq '已登记 v1')           'a.pdf 登记基线'
+Check ($r1.vals["$attach\b.pdf"] -eq '已登记 v1')          'b.pdf 登记基线'
 Check ($r1.vals["$attach\broken.pdf"] -eq '—')             '断链行不参与基线（—）'
 $h1 = (Get-Content $baseline) -join '|'
 Check ($h1 -match 'a\.pdf\|[0-9a-f]{64}')                  '基线含 a.pdf 的64位哈希'
@@ -70,7 +70,7 @@ Check ($h1 -match 'a\.pdf\|[0-9a-f]{64}')                  '基线含 a.pdf 的6
 Set-Content "$attDir\a.pdf" -Value 'CLOBBERED-by-sync'
 $r2 = ColF $xl "$wbDir\main.xlsx"
 Check ($r2.vals["$attach\a.pdf"] -eq '■ 内容变更')          '篡改被红字警示'
-Check ($r2.vals["$attach\b.pdf"] -eq '一致')                '未动文件仍一致'
+Check ($r2.vals["$attach\b.pdf"] -eq '一致 v1')                '未动文件仍一致'
 $h2 = (Get-Content $baseline) -join '|'
 Check ($h1 -eq $h2)                                        '基线未被篡改洗白（哈希保持登记时值）'
 Check ($r2.summary -match '内容变更 1')                     '汇总计入内容变更 1'
@@ -78,12 +78,12 @@ Check ($r2.summary -match '内容变更 1')                     '汇总计入内
 '--- 3) 有意替换：删基线重建 ---'
 Remove-Item $baseline -Force
 $r3 = ColF $xl "$wbDir\main.xlsx"
-Check ($r3.vals["$attach\a.pdf"] -eq '已登记基线')          '重建基线后重新登记'
+Check ($r3.vals["$attach\a.pdf"] -eq '已登记 v1')          '重建基线后重新登记'
 
 '--- 4) 二次体检全部一致 ---'
 $r4 = ColF $xl "$wbDir\main.xlsx"
-Check ($r4.vals["$attach\a.pdf"] -eq '一致')                'a.pdf 一致'
-Check ($r4.vals["$attach\b.pdf"] -eq '一致')                'b.pdf 一致'
+Check ($r4.vals["$attach\a.pdf"] -eq '一致 v1')                'a.pdf 一致'
+Check ($r4.vals["$attach\b.pdf"] -eq '一致 v1')                'b.pdf 一致'
 
 try { foreach ($w in @($xl.Workbooks)) { $w.Saved = $true }; $xl.Quit() } catch {}
 Start-Sleep 2
