@@ -1,9 +1,10 @@
-# AttachLink —— 审计底稿附件链接加载项
+﻿# AttachLink —— 审计底稿附件链接加载项
 
-[![Release v1.0.0](https://img.shields.io/badge/Release-v1.0.0-217346)](https://github.com/jasonisbrave/attachlink/releases)
+[![Release v1.3.0](https://img.shields.io/badge/Release-v1.3.0-217346)](https://github.com/jasonisbrave/attachlink/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-217346)](https://github.com/jasonisbrave/attachlink/blob/main/LICENSE)
 ![Platform Windows](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
 ![Excel 2010+](https://img.shields.io/badge/Excel-2010%2B-217346?logo=microsoftexcel&logoColor=white)
+![WPS 支持 v1.3.0+](https://img.shields.io/badge/WPS-%E6%94%AF%E6%8C%81%20v1.3.0%2B-E8380D)
 
 Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**），用于在审计底稿中批量插入附件超链接：
 
@@ -21,7 +22,14 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
 ## 环境要求
 
 - Windows + 桌面版 Excel 2010 及以上；PowerShell 5.1+
-- 不适用于 WPS / Mac / 网页版 Excel
+- **WPS 表格亦支持（v1.3.0 起）**
+  - 需在 WPS 中启用 VBA 环境（个人版安装 VBA 支持包，专业版自带）
+  - 核心功能（插入/清单体检/哈希基线/文件夹引用/重命名/断链修复）实测可用
+  - WPS 宏安全会拦截子进程，哈希走内置纯 VBA 实现（数 MB 附件的体检耗时约数十秒，属一次性登记成本）
+  - **文件夹引用与清单体检在 WPS 端耗时明显长于 Excel**（纯 VBA 哈希约为 `certutil` 的 1/10 速度）——属 WPS 宿主限制（已知软件层面问题），耗时可接受则无需处理
+  - **鼎信诺基于 Excel COM 自动化，在 WPS 下无法使用**——归档迁移、看门狗等鼎信诺配套功能仅面向 Excel，WPS 无需也不支持（归档流程请在 Excel 端完成）
+  - 菜单自愈/保存归一化等宿主事件特性以 Excel 为准
+- 不适用于 Mac / 网页版（链接查看不受限：归档件中的普通超链接在任何表格软件中均可点击）
 
 ## 快速开始
 
@@ -65,6 +73,7 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
    - **1c. 重命名链接显示名**
      - 只改超链接显示文本（应对收到的文件命名不规范/不清晰），不改动文件本身与链接地址
      - 体检、基线、归档迁移均不受影响
+     - **支持多选批量**：选区内全部附件链接按行序逐个弹窗（含进度 i/N），留空/取消即停止，已改保留
 2. **附件清单 / 体检**：按底稿 sheet 分组编号（如 `货币资金-01`），自动检查每个附件文件是否存在，断链红字标注并汇总；**内容基线校验（SHA-256）**——首次体检把每个附件的内容哈希登记到 `附件\_attachlink_baseline.csv`（随附件夹整体归档迁移/网盘同步），此后体检比对哈希，附件被替换/篡改/同步端同名静默覆盖时红字「■ 内容变更」持续警示（基线不被自动洗白；确为有意替换时删除该文件重新生成清单即重建基线）
 3. **断链修复**：指定附件文件夹当前位置，按文件名自动重连（适用于归档件搬家后的场景）
 4. **清除链接**：清除选区内的附件链接并恢复单元格字体格式
@@ -80,7 +89,7 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
 |:---|:---|
 | **插入附件链接（可多选）** | 插入附件链接；也可按 **Ctrl+Shift+A** |
 | **插入文件夹引用** | 插入文件夹引用 |
-| **重命名链接显示名** | 选中链接单元格后，重命名链接显示名 |
+| **重命名链接显示名** | 选中链接单元格后运行；支持多选批量 |
 | **附件清单** ▸ 附件清单 / 体检 | 生成附件清单并体检；也可按 **Ctrl+Shift+K** |
 | **附件清单** ▸ 附件断链修复 | 修复附件断链 |
 | **归档** ▸ 归档迁移（批量） | 在**归档目录**（如鼎信诺归档出的「财报底稿」文件夹）中打开任一底稿后运行 |
@@ -116,16 +125,21 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
 - 静默参数（自动化/高级用户）：`/install`、`/deploy-elevated`、`/uninstall`、`/uninstall-elevated`、`/selfcheck`
 - 安装日志：`%TEMP%\AttachLinkSetup.log`
 
-### 方式二：脚本 zip（备用）
+### 方式二：脚本安装（备用，exe 被安全软件拦截时使用）
 
-把 `excel-attach-addin` 文件夹打包 zip 发给同事，解压到本地后**双击 `一键安装.bat`**，按提示完成即可，全程无需命令行操作。卸载：双击 `一键卸载.bat`（仅用户级；曾做过方式五部署的机器另行运行 `build\install-elevated.ps1 -Uninstall`）。
+完整项目文件夹（或按下方清单裁剪的 zip）解压后，在解压目录运行：
 
-<details>
-<summary><strong>分发清单（运行完整版，按此裁剪 zip）</strong>（点击展开）</summary>
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1             # 安装
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall  # 卸载（仅用户级；机器级见方式五）
+```
+
+纯 PowerShell 实现，无未签名 exe 的 SmartScreen/杀软摩擦。
+
+分发清单（运行完整版，按此裁剪 zip）：
 
 | 必须包含 | 用途 |
 |:---|:---|
-| `一键安装.bat` / `一键卸载.bat` | 同事入口 |
 | `README.md` | 用法说明 |
 | `dist\AttachLink.xlam` | 预构建安装包 |
 | `scripts\setup.ps1` | 安装编排 |
@@ -134,9 +148,6 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
 
 - 如需保留「缺产物时现场构建」（B 回退），再附 `build\build.ps1` + `src\AttachLink.bas` + `src\AttachLink.ThisWorkbook.vba`；纯接收版可不带源码（缺 dist 会直接提示包不完整）
 - 无需分发：`WORKLOG.md`、`开发交接.md`、`scripts\test-*.ps1`、`src/AttachLinkShim.cs`、`packaging\`、`.git`
-- zip 下载后先解除锁定再解压（见方式一提示）
-
-</details>
 
 ### 方式三：脚本安装（本地）
 
@@ -268,6 +279,7 @@ powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1 -Uninstall
 ## 常见问题
 
 - **右键菜单不见了**：通常是 xlam 未加载（Excel 重启后加载项被取消勾选），在「选项 → 加载项 → 转到」重新勾选 AttachLink，或重开 Excel。
+  - **升级 xlam 后务必彻底退出 Excel 再重开**：Excel 是单实例应用，关窗口≠退进程——若进程驻留，重新「打开」会连回旧进程（旧代码、旧菜单），看起来就像新版本没生效（可用任务管理器确认无 `EXCEL.EXE` 残留）。
 - **鼎信诺打开的底稿里没有右键菜单**：确认已以管理员运行过 `build\install-elevated.ps1`（机器级看门狗部署）；查看 `%TEMP%\AttachLinkWatchdog.log` 是否有「看门狗启动/已装载并初始化」记录；打开底稿后等待 2~4 秒。
 - **点击链接提示无法打开**：底稿与附件文件夹不再是同级结构，运行「附件清单 / 体检」查看断链，再用「附件断链修复」重连。
 - **归档件链接指回账套原地址**：鼎信诺归档（另存底稿到新目录）时 Excel 会把链接重基为指回账套的路径。在归档目录打开任一底稿 → 右键「归档迁移（批量）」→ 选账套中的附件文件夹 → 确认。附件夹整体移动到归档目录，全部底稿链接批量改写为相对地址。注意：移动后账套底稿的链接会失效（如需回溯账套底稿，用「附件断链修复」指向归档附件夹）。
@@ -280,7 +292,6 @@ powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1 -Uninstall
   - **更新路径**：清除链接 → 删除附件夹内旧文件夹 → 重新插入 → 删除基线文件并重建
   - **基线注意**：仅重插不重建基线，内容差异仍会红字
 - **收到的文件命名不规范**：选中链接单元格 → 右键「重命名链接显示名」——只改显示文本，不动文件本身，体检/哈希不受影响。
-- **双击一键安装闪退或提示找不到文件**：请先把 zip **解压到本地文件夹**（不要在压缩包预览窗口里直接双击），再运行 `一键安装.bat`。
 
 ## 已知限制
 
@@ -301,8 +312,6 @@ powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1 -Uninstall
 
 ```
 excel-attach-addin/
-├── 一键安装.bat                      # 双击安装（同事使用入口）
-├── 一键卸载.bat                      # 双击卸载
 ├── src/
 │   ├── AttachLink.bas               # 主模块源码（全部功能 + 顶部配置区）
 │   ├── AttachLink.ThisWorkbook.vba  # ThisWorkbook 事件代码（保存时链接归一化）
@@ -317,7 +326,7 @@ excel-attach-addin/
 │   ├── run-elevated.ps1             # 提权桥（UAC 启动 + 日志/退出码回传）
 │   └── elevated-capture.ps1         # 提权侧输出捕获包装器
 ├── scripts/
-│   ├── setup.ps1                    # 一键安装/卸载编排脚本（bat 调用）
+│   ├── setup.ps1                    # 安装/卸载编排（备用命令行入口，见方式二）
 │   ├── watchdog.ps1                 # 外部看门狗：为自动化拉起的 Excel 装载 xlam
 │   │                                #   ⚠ 必须保存为 UTF-8 with BOM（PS5.1 按 ANSI 误读
 │   │                                #     无 BOM 文件，中文注释乱码可吞换行破坏 C# 编译）
@@ -325,7 +334,8 @@ excel-attach-addin/
 │   ├── test-migrate.ps1             # 归档迁移功能测试（夹具：账套附件夹 × 归档底稿，期望 RESULT: PASS）
 │   ├── test-hash.ps1                # 内容基线生命周期测试（登记→篡改→重建→复检，期望 RESULT: PASS）
 │   ├── test-version.ps1             # 附件版本更新生命周期测试（v1→v2→留痕，期望 RESULT: PASS）
-│   ├── test-folder.ps1              # 文件夹引用 / 二级菜单 / 复核修复回归（21 断言，期望 RESULT: PASS）
+│   ├── test-folder.ps1              # 文件夹引用 / 二级菜单 / 复核修复回归（25 断言，期望 RESULT: PASS）
+│   ├── test-wps.ps1                 # WPS 兼容验证（ket.Application COM 自动化，期望 RESULT: PASS）
 │   └── watchdog_launcher.vbs        # 计划任务隐藏启动器（纯 ASCII，部署到 Program Files）
 ├── dist/                            # 构建产物（分发给同事时必须包含 AttachLink.xlam）
 ├── README.md                        # 使用说明 + 双重复核记录
@@ -411,5 +421,5 @@ powershell -ExecutionPolicy Bypass -File build\build.ps1
 ### 本轮修复后验证（2026-11-18）
 
 - 重新构建 `dist/AttachLink.xlam`：编译自检通过
-- 重新一键安装：安装成功；受信任位置写入正确键（`Security\Trusted Locations\AttachLink`，AllowSubFolders=0），历史错误键与遗留子目录已清理
+- 重新脚本安装：安装成功；受信任位置写入正确键（`Security\Trusted Locations\AttachLink`，AllowSubFolders=0），历史错误键与遗留子目录已清理
 - AccessVBOM 构建开关正确还原原值

@@ -1,6 +1,7 @@
 ﻿# =====================================================================
-# AttachLink 一键安装 / 一键卸载 编排脚本
-# 由项目根目录的「一键安装.bat」「一键卸载.bat」调用，也可手动运行：
+# AttachLink 安装 / 卸载 编排脚本（备用命令行入口）
+# 主入口为 AttachLinkSetup.exe（安装器）；本脚本供 exe 被安全软件拦截时
+# 手动运行，也可被其他工具编排调用：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1             安装
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall  卸载
 # =====================================================================
@@ -28,7 +29,8 @@ Write-Host '==================================================='
 if (-not $Uninstall) {
     # ---- 1. Excel 运行检查 ----
     while ($true) {
-        $xl = Get-Process -Name EXCEL -ErrorAction SilentlyContinue
+        $xl = Get-Process -Name EXCEL -ErrorAction SilentlyContinue |
+            Where-Object { $_.WorkingSet64 -gt 1MB }   # 过滤墓碑进程（已退出但被句柄持有的残影，内存趋零）——2026-11-21 实测误报修复
         if (-not $xl) { break }
         if ($NonInteractive) {
             Write-Host '>> 错误：检测到 Excel 正在运行。请先关闭所有 Excel（含鼎信诺）后重试。'

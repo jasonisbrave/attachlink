@@ -28,6 +28,10 @@ Attribute VB_Name = "AttachLink"
 '   - 与鼎信诺 COM 加载项共存（走「Excel 加载项」通道，不注册 COM）
 '   - 底稿文件保持无宏（宏全部在本加载项内，不污染底稿）
 '   - 使用普通超链接而非 HYPERLINK 公式（避免鼎信诺归档公式值化失效）
+'   - WPS 兼容（1.3.0）：宿主对象一律晚绑定（As Object）+ 枚举用字面值——
+'     WPS VBA 缺 Office 共享类型（FileDialog/CommandBar* 等）与 mso*/xl* 常量，
+'     早绑定会触发「用户定义类型未定义」的模块编译错误；清单表归属标记在
+'     CustomProperties 之外增加 sheet 级名称回退
 ' 构建与安装：见 build\build.ps1 与 build\install.ps1
 '=====================================================================
 Option Explicit
@@ -47,10 +51,11 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 ' 附件清单工作表名
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.3.0：WPS 表格支持（全量晚绑定改造，需宿主启用 VBA 环境）+ 重命名多选批量 + 安装器墓碑进程误报修复
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ⚠ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.2.1"
+Public Const ATTACHLINK_VERSION As String = "1.3.0"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"
@@ -64,22 +69,7 @@ Private Const BASELINE_FILE As String = "_attachlink_baseline.csv"
 ' SHA-256 经 WinCrypt CAPI（advapi32）：系统原生组件，无 COM/.NET 依赖
 ' （.NET COM 路线已实测排除：SHA256Managed 在 .NET 4.x 无 ComputeHash_2、
 '  SHA256CryptoServiceProvider 未注册）。
-#If VBA7 Then
-Private Declare PtrSafe Function CryptAcquireContextW Lib "advapi32" (ByRef phProv As LongPtr, ByVal szContainer As LongPtr, ByVal szProvider As LongPtr, ByVal dwProvType As Long, ByVal dwFlags As Long) As Long
-Private Declare PtrSafe Function CryptReleaseContext Lib "advapi32" (ByVal hProv As LongPtr, ByVal dwFlags As Long) As Long
-Private Declare PtrSafe Function CryptCreateHash Lib "advapi32" (ByVal hProv As LongPtr, ByVal algId As Long, ByVal hKey As LongPtr, ByVal dwFlags As Long, ByRef phHash As LongPtr) As Long
-Private Declare PtrSafe Function CryptHashData Lib "advapi32" (ByVal hHash As LongPtr, ByVal pbData As LongPtr, ByVal dwDataLen As Long, ByVal dwFlags As Long) As Long
-Private Declare PtrSafe Function CryptGetHashParam Lib "advapi32" (ByVal hHash As LongPtr, ByVal dwParam As Long, ByVal pbData As LongPtr, ByRef pdwDataLen As Long, ByVal dwFlags As Long) As Long
-Private Declare PtrSafe Function CryptDestroyHash Lib "advapi32" (ByVal hHash As LongPtr) As Long
-#Else
-Private Declare Function CryptAcquireContextW Lib "advapi32" (ByRef phProv As Long, ByVal szContainer As Long, ByVal szProvider As Long, ByVal dwProvType As Long, ByVal dwFlags As Long) As Long
-Private Declare Function CryptReleaseContext Lib "advapi32" (ByVal hProv As Long, ByVal dwFlags As Long) As Long
-Private Declare Function CryptCreateHash Lib "advapi32" (ByVal hProv As Long, ByVal algId As Long, ByVal hKey As Long, ByVal dwFlags As Long, ByRef phHash As Long) As Long
-Private Declare Function CryptHashData Lib "advapi32" (ByVal hHash As Long, ByVal pbData As Long, ByVal dwDataLen As Long, ByVal dwFlags As Long) As Long
-Private Declare Function CryptGetHashParam Lib "advapi32" (ByVal hHash As Long, ByVal dwParam As Long, ByVal pbData As Long, ByRef pdwDataLen As Long, ByVal dwFlags As Long) As Long
-Private Declare Function CryptDestroyHash Lib "advapi32" (ByVal hHash As Long) As Long
-#End If
-
+'（CAPI Declare 块已于 1.3.0 移除：WPS VBA 缺 LongPtr/PtrSafe 生态，哈希改经 certutil，见 Sha256File 注释）
 ' 上次已提示过「已存在」的附件文件夹路径（会话级记忆，避免重复打扰）
 Private lastNotifiedAttachDir As String
 ' 上次选取附件/文件夹的源目录（会话级记忆：插入对话框优先定位到这里，不再每次落在附件夹）
@@ -102,7 +92,7 @@ End Sub
 ' 右键菜单自愈：菜单被其他加载项（如鼎信诺）重置/清除时，下次右键前自动补回
 Public Sub AttachLink_EnsureMenu()
     On Error Resume Next
-    Dim cb As CommandBar, c As CommandBarControl, found As Boolean
+    Dim cb As Object, c As Object, found As Boolean
     Set cb = Application.CommandBars("Cell")
     If cb Is Nothing Then Exit Sub
     For Each c In cb.Controls
@@ -118,7 +108,7 @@ Public Sub Auto_Close()
 End Sub
 
 Private Sub RegisterMenu(ByVal adding As Boolean)
-    Dim cb As CommandBar, ctl As CommandBarControl, btn As CommandBarButton
+    Dim cb As Object, ctl As Object, btn As Object
     On Error Resume Next
     Set cb = Application.CommandBars("Cell")
     If cb Is Nothing Then Exit Sub
@@ -126,45 +116,45 @@ Private Sub RegisterMenu(ByVal adding As Boolean)
         If ctl.Tag = MENU_TAG Then ctl.Delete
     Next ctl
     If adding Then
-        Set btn = cb.Controls.Add(msoControlButton, , , 1, True)
+        Set btn = cb.Controls.Add(1, , , 1, True)
         btn.Caption = "插入附件链接（可多选）"
         btn.OnAction = "AttachLink_Insert"
         btn.Tag = MENU_TAG
         btn.BeginGroup = True
 
-        Set btn = cb.Controls.Add(msoControlButton, , , 2, True)
+        Set btn = cb.Controls.Add(1, , , 2, True)
         btn.Caption = "插入文件夹引用"
         btn.OnAction = "AttachLink_InsertFolder"
         btn.Tag = MENU_TAG
 
-        Set btn = cb.Controls.Add(msoControlButton, , , 3, True)
+        Set btn = cb.Controls.Add(1, , , 3, True)
         btn.Caption = "重命名链接显示名"
         btn.OnAction = "AttachLink_RenameLink"
         btn.Tag = MENU_TAG
 
         ' 二级菜单：附件清单（体检 / 断链修复）
-        Dim pop As CommandBarPopup, subBtn As CommandBarButton
-        Set pop = cb.Controls.Add(msoControlPopup, , , 4, True)
+        Dim pop As Object, subBtn As Object
+        Set pop = cb.Controls.Add(10, , , 4, True)
         pop.Caption = "附件清单"
         pop.Tag = MENU_TAG
-        Set subBtn = pop.Controls.Add(msoControlButton, , , 1, True)
+        Set subBtn = pop.Controls.Add(1, , , 1, True)
         subBtn.Caption = "附件清单 / 体检"
         subBtn.OnAction = "AttachLink_BuildIndex"
         subBtn.Tag = MENU_TAG
-        Set subBtn = pop.Controls.Add(msoControlButton, , , 2, True)
+        Set subBtn = pop.Controls.Add(1, , , 2, True)
         subBtn.Caption = "附件断链修复"
         subBtn.OnAction = "AttachLink_Repair"
         subBtn.Tag = MENU_TAG
 
         ' 二级菜单：归档（迁移 / 版本更新）
-        Set pop = cb.Controls.Add(msoControlPopup, , , 5, True)
+        Set pop = cb.Controls.Add(10, , , 5, True)
         pop.Caption = "归档"
         pop.Tag = MENU_TAG
-        Set subBtn = pop.Controls.Add(msoControlButton, , , 1, True)
+        Set subBtn = pop.Controls.Add(1, , , 1, True)
         subBtn.Caption = "归档迁移（批量）"
         subBtn.OnAction = "AttachLink_ArchiveMigrate"
         subBtn.Tag = MENU_TAG
-        Set subBtn = pop.Controls.Add(msoControlButton, , , 2, True)
+        Set subBtn = pop.Controls.Add(1, , , 2, True)
         subBtn.Caption = "附件版本更新"
         subBtn.OnAction = "AttachLink_UpdateVersion"
         subBtn.Tag = MENU_TAG
@@ -174,7 +164,7 @@ End Sub
 '============================ 1. 插入附件链接 =========================
 Public Sub AttachLink_Insert()
     On Error GoTo Fail
-    Dim wb As Workbook
+    Dim wb As Object
     Set wb = ActiveWorkbook
     If wb Is Nothing Then Exit Sub
     If Len(wb.Path) = 0 Then
@@ -202,8 +192,8 @@ Public Sub AttachLink_Insert()
     attachDir = EnsureAttachDirPrompted(fso, wb)
     If Len(attachDir) = 0 Then Exit Sub
 
-    Dim fd As FileDialog
-    Set fd = Application.FileDialog(msoFileDialogFilePicker)
+    Dim fd As Object
+    Set fd = Application.FileDialog(3)
     With fd
         .Title = "选择要插入的附件（Ctrl / Shift 可多选）"
         .AllowMultiSelect = True
@@ -224,7 +214,7 @@ Public Sub AttachLink_Insert()
 
     Dim inserted As Long, skipped As Long, idx As Long
     Dim i As Long
-    Dim destPath As String, targetCell As Range
+    Dim destPath As String, targetCell As Object
 
     For i = 1 To fd.SelectedItems.Count
         destPath = ArchiveFile(fso, fd.SelectedItems(i), attachDir)
@@ -267,7 +257,7 @@ End Sub
 '   基线文件后重新生成清单即可重建。
 Public Sub AttachLink_BuildIndex()
     On Error GoTo Fail
-    Dim wb As Workbook
+    Dim wb As Object
     Set wb = ActiveWorkbook
     If wb Is Nothing Then Exit Sub
     If Len(wb.Path) = 0 Then
@@ -282,7 +272,7 @@ Fail:
 End Sub
 
 ' 清单核心（独立公开函数：便于自动化测试），返回汇总文本
-Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
+Public Function AttachLink_BuildIndexCore(ByVal wb As Object) As String
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     Dim attachDir As String
@@ -294,7 +284,7 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
     Dim baseDirty As Boolean
 
     Application.ScreenUpdating = False
-    Dim wsIdx As Worksheet
+    Dim wsIdx As Object
     Set wsIdx = GetOrCreateIndexSheet(wb)
     If wsIdx Is Nothing Then
         Application.ScreenUpdating = True
@@ -314,7 +304,7 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
     wsIdx.Range("A2").Value = "生成时间：" & Format(Now, "yyyy-mm-dd hh:nn")
     wsIdx.Range("A3:G3").Value = Array("编号", "附件名", "相对路径", "所在位置", "状态", "内容基线", "更替记录")
 
-    Dim ws As Worksheet, hl As Hyperlink
+    Dim ws As Object, hl As Object
     Dim r As Long, total As Long, brokenCnt As Long, changedCnt As Long, unavailCnt As Long
     Dim cnt As Long, g As Long
     Dim linkPath As String, ok As Boolean
@@ -469,7 +459,7 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
         .Columns("G").ColumnWidth = 24
         .Range("A3:G3").Font.Bold = True
         .Range("A3:G3").Interior.Color = RGB(237, 237, 237)
-        If r > 4 Then .Range("A3:G" & (r - 1)).Borders.LineStyle = xlContinuous
+        If r > 4 Then .Range("A3:G" & (r - 1)).Borders.LineStyle = 1
     End With
 
     Application.ScreenUpdating = True
@@ -501,7 +491,7 @@ End Function
 '============================ 3. 断链修复 =============================
 Public Sub AttachLink_Repair()
     On Error GoTo Fail
-    Dim wb As Workbook
+    Dim wb As Object
     Set wb = ActiveWorkbook
     If wb Is Nothing Then Exit Sub
     If Len(wb.Path) = 0 Then
@@ -521,7 +511,7 @@ Public Sub AttachLink_Repair()
     ' 否则健康文件夹会被误列入修复并用源目录合并覆盖）
     Dim broken As Collection
     Set broken = New Collection
-    Dim ws As Worksheet, hl As Hyperlink, rp As String
+    Dim ws As Object, hl As Object, rp As String
     For Each ws In wb.Worksheets
         If StrComp(ws.Name, INDEX_SHEET_NAME, vbTextCompare) <> 0 Then
             For Each hl In ws.Hyperlinks
@@ -538,8 +528,8 @@ Public Sub AttachLink_Repair()
     End If
 
     ' 选择附件文件夹当前位置
-    Dim fd As FileDialog
-    Set fd = Application.FileDialog(msoFileDialogFolderPicker)
+    Dim fd As Object
+    Set fd = Application.FileDialog(4)
     With fd
         .Title = "选择附件文件当前所在的文件夹（共 " & broken.Count & " 个断链待修复）"
         .InitialFileName = wb.Path & "\"
@@ -603,7 +593,7 @@ Public Sub AttachLink_ClearSelection()
         Exit Sub
     End If
 
-    Dim cnt As Long, area As Range, c As Range
+    Dim cnt As Long, area As Object, c As Object
     For Each area In Selection.Areas
         For Each c In area.Cells
             cnt = cnt + ClearCellLinks(c)
@@ -623,7 +613,7 @@ End Sub
 '============================ 5. 保存保护 =============================
 ' 保存前把被 Excel 改写为绝对路径、且确实位于本底稿附件文件夹内的
 ' 链接归一化回相对路径。由 ThisWorkbook 的 app_WorkbookBeforeSave 调用。
-Public Sub NormalizeAttachmentLinks(ByVal wb As Workbook)
+Public Sub NormalizeAttachmentLinks(ByVal wb As Object)
     On Error Resume Next
     If wb Is Nothing Then Exit Sub
     If Len(wb.Path) = 0 Then Exit Sub
@@ -631,7 +621,7 @@ Public Sub NormalizeAttachmentLinks(ByVal wb As Workbook)
     Set fso = CreateObject("Scripting.FileSystemObject")
     Dim attachDir As String
     attachDir = wb.Path & "\" & ATTACH_FOLDER_NAME
-    Dim ws As Worksheet, hl As Hyperlink, parentDir As String
+    Dim ws As Object, hl As Object, parentDir As String
     For Each ws In wb.Worksheets
         For Each hl In ws.Hyperlinks
             If IsAttachmentLink(hl, fso) Then
@@ -652,7 +642,7 @@ End Sub
 ' 夹内全部文件自动纳入内容基线（体检可检测夹内篡改）。
 Public Sub AttachLink_InsertFolder()
     On Error GoTo Fail
-    Dim wb As Workbook
+    Dim wb As Object
     Set wb = ActiveWorkbook
     If wb Is Nothing Then Exit Sub
     If Len(wb.Path) = 0 Then
@@ -675,8 +665,8 @@ Public Sub AttachLink_InsertFolder()
     attachDir = EnsureAttachDirPrompted(fso, wb)
     If Len(attachDir) = 0 Then Exit Sub
 
-    Dim fd As FileDialog
-    Set fd = Application.FileDialog(msoFileDialogFolderPicker)
+    Dim fd As Object
+    Set fd = Application.FileDialog(4)
     With fd
         .Title = "选择要引用的文件夹（将整体复制到底稿附件夹）"
         If Len(lastSourceDir) > 0 Then
@@ -744,7 +734,7 @@ End Sub
 ' 目录为基准，复制源文件夹到附件夹（合并覆盖）并把夹内全部文件登记入
 ' 内容基线（仅登记缺失键，不改既有版本）。返回汇总文本。
 Public Function AttachLink_InsertFolderCore(ByVal srcDir As String) As String
-    Dim wbHost As Workbook
+    Dim wbHost As Object
     Set wbHost = ActiveWorkbook
     If wbHost Is Nothing Then
         AttachLink_InsertFolderCore = "失败：没有活动工作簿。"
@@ -850,6 +840,8 @@ End Function
 '============================ 1c. 重命名链接显示名 ====================
 ' 只改超链接的显示文本（应对收到的文件命名不规范/不清晰），不改动
 ' 底层文件名与链接地址——体检、哈希基线、归档迁移均不受影响。
+' 支持多选批量：选区内全部附件链接按行序逐个弹窗（标题含进度 i/N），
+' 留空或取消即停止后续（已改的保留），结束后汇总。
 Public Sub AttachLink_RenameLink()
     On Error GoTo Fail
     If TypeName(Selection) <> "Range" Then
@@ -859,29 +851,94 @@ Public Sub AttachLink_RenameLink()
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
 
-    Dim c As Range, hl As Hyperlink, target As Hyperlink
-    Set target = Nothing
-    For Each c In Selection.Cells
+    ' 收集选区内全部附件链接（行序）。
+    ' 超大选区（Ctrl+A 全选/整行整列）自动与已用区域交叠限域——否则逐格 COM 迭代
+    ' 亿级单元格形同冻结（2026-11-21 用户实测「全选后只能单个修改」的根因）
+    Dim links As Collection
+    Set links = New Collection
+    Dim c As Object, hl As Object, scanRange As Object
+    Set scanRange = GetScanRange()
+    If scanRange Is Nothing Then
+        MsgBox "选区内未发现附件链接。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+    For Each c In scanRange.Cells
         For Each hl In c.Hyperlinks
-            If IsAttachmentLink(hl, fso) Then Set target = hl: Exit For
+            If IsAttachmentLink(hl, fso) Then links.Add hl
         Next hl
-        If Not target Is Nothing Then Exit For
     Next c
-    If target Is Nothing Then
+    If links.Count = 0 Then
         MsgBox "选区内未发现附件链接。", vbInformation, "AttachLink"
         Exit Sub
     End If
 
-    Dim newName As String
-    newName = InputBox("请输入新的显示名（仅改变链接显示文本，不改动文件本身）：", _
-                       "AttachLink 重命名链接显示名", target.TextToDisplay)
-    newName = Trim$(newName)
-    If Len(newName) = 0 Then Exit Sub
-    target.TextToDisplay = newName
+    Dim i As Long, newName As String, doneCnt As Long, stopped As Boolean
+    For i = 1 To links.Count
+        newName = InputBox("重命名附件（" & i & "/" & links.Count & "）：留空或点「取消」停止批量。" & vbCrLf & _
+                           "（仅改变链接显示文本，不改动文件本身）", _
+                           "AttachLink 重命名链接显示名", links(i).TextToDisplay)
+        newName = Trim$(newName)
+        If Len(newName) = 0 Then
+            stopped = True
+            Exit For
+        End If
+        If StrComp(newName, links(i).TextToDisplay, vbBinaryCompare) <> 0 Then
+            links(i).TextToDisplay = newName
+            doneCnt = doneCnt + 1
+        End If
+    Next i
+
+    If links.Count = 1 And doneCnt = 0 And Not stopped Then
+        ' 单选未改动：无需提示
+    ElseIf stopped And i = 1 Then
+        ' 第一个就取消：静默退出
+    Else
+        MsgBox "批量重命名结束：已改名 " & doneCnt & " 个（共 " & links.Count & " 个" & _
+               IIf(stopped, "，在第 " & i & " 个停止", "") & "）。", vbInformation, "AttachLink"
+    End If
     Exit Sub
 Fail:
     MsgBox "重命名时出错：" & Err.Description, vbCritical, "AttachLink"
 End Sub
+
+' 收集/扫描范围解析：Selection 过大（全选/整行/整列，CountLarge>65536）时与
+' 工作表已用区域交叠，避免逐格迭代亿级单元格；交叠为空返回 Nothing
+Private Function GetScanRange() As Object
+    On Error Resume Next
+    Dim sel As Object, ws As Object
+    Set sel = Selection
+    Set ws = sel.Worksheet
+    If sel.Cells.CountLarge > 65536 Then
+        Set GetScanRange = Application.Intersect(sel, ws.UsedRange)
+    Else
+        Set GetScanRange = sel
+    End If
+End Function
+
+' [诊断保留 2026-11-21] 批量重命名核心机制复现（含全选限域回归；下版随测试入仓可移除）
+Public Function AttachLink_RenameDiag(ByVal newNamePrefix As String) As String
+    Dim out As String
+    On Error GoTo Fail
+    If TypeName(Selection) <> "Range" Then AttachLink_RenameDiag = "sel=" & TypeName(Selection): Exit Function
+    Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim links As Collection: Set links = New Collection
+    Dim c As Object, hl As Object
+    For Each c In GetScanRange().Cells
+        For Each hl In c.Hyperlinks
+            If IsAttachmentLink(hl, fso) Then links.Add hl
+        Next hl
+    Next c
+    out = "collected=" & links.Count & ";"
+    Dim i As Long
+    For i = 1 To links.Count
+        links(i).TextToDisplay = newNamePrefix & i
+        out = out & "r" & i & "=ok;"
+    Next i
+    AttachLink_RenameDiag = out
+    Exit Function
+Fail:
+    AttachLink_RenameDiag = out & "ERR=" & Err.Number & ":" & Err.Description
+End Function
 
 '============================ 6. 归档迁移（批量）======================
 ' 场景：鼎信诺「归档」把处理后的底稿另存到新目录（如 桌面\客户名\财报底稿），
@@ -897,7 +954,7 @@ End Sub
 ' 范围：仅处理归档目录第一层的 .xls/.xlsx/.xlsm/.xlsb（与鼎信诺归档输出一致）
 Public Sub AttachLink_ArchiveMigrate()
     On Error GoTo Fail
-    Dim wb As Workbook
+    Dim wb As Object
     Set wb = ActiveWorkbook
     If wb Is Nothing Then Exit Sub
     If Len(wb.Path) = 0 Then
@@ -916,8 +973,8 @@ Public Sub AttachLink_ArchiveMigrate()
     Dim suggest As String
     suggest = SuggestAttachSource(wb, fso)
 
-    Dim fd As FileDialog
-    Set fd = Application.FileDialog(msoFileDialogFolderPicker)
+    Dim fd As Object
+    Set fd = Application.FileDialog(4)
     With fd
         .Title = "选择编制阶段的「" & ATTACH_FOLDER_NAME & "」文件夹（源 = 账套中的附件文件夹）"
         If Len(suggest) > 0 Then
@@ -961,7 +1018,7 @@ End Sub
 ' 归档迁移核心（独立公开函数：便于自动化测试与复用）。以当前活动工作簿
 ' 所在目录为归档目录。返回汇总文本；失败信息也包含在返回文本中。
 Public Function AttachLink_ArchiveMigrateCore(ByVal srcDir As String) As String
-    Dim wbHost As Workbook
+    Dim wbHost As Object
     Set wbHost = ActiveWorkbook
     If wbHost Is Nothing Then
         AttachLink_ArchiveMigrateCore = "失败：没有活动工作簿（请在归档目录中打开任一底稿后运行）。"
@@ -1005,7 +1062,7 @@ Public Function AttachLink_ArchiveMigrateCore(ByVal srcDir As String) As String
 
     ' 2) 批量改写归档目录第一层的 Excel 底稿
     Dim scanned As Long, touched As Long, rewritten As Long
-    Dim f As Object, wb As Workbook, n As Long, opened As Boolean
+    Dim f As Object, wb As Object, n As Long, opened As Boolean
     For Each f In fso.GetFolder(archiveRoot).Files
         Select Case LCase$(fso.GetExtensionName(f.Name))
             Case "xls", "xlsx", "xlsm", "xlsb"
@@ -1083,7 +1140,7 @@ End Function
 ' 用法：选中带附件链接的单元格 → 右键「附件版本更新」→ 选择新文件 → 确认。
 Public Sub AttachLink_UpdateVersion()
     On Error GoTo Fail
-    Dim wb As Workbook
+    Dim wb As Object
     Set wb = ActiveWorkbook
     If wb Is Nothing Then Exit Sub
     If Len(wb.Path) = 0 Then
@@ -1098,15 +1155,18 @@ Public Sub AttachLink_UpdateVersion()
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
 
-    ' 取选区中第一个附件链接
-    Dim c As Range, hl As Hyperlink, target As Hyperlink
+    ' 取选区中第一个附件链接（超大选区经 GetScanRange 限域，防全选冻结）
+    Dim c As Object, hl As Object, target As Object, scanR As Object
     Set target = Nothing
-    For Each c In Selection.Cells
-        For Each hl In c.Hyperlinks
-            If IsAttachmentLink(hl, fso) Then Set target = hl: Exit For
-        Next hl
-        If Not target Is Nothing Then Exit For
-    Next c
+    Set scanR = GetScanRange()
+    If Not scanR Is Nothing Then
+        For Each c In scanR.Cells
+            For Each hl In c.Hyperlinks
+                If IsAttachmentLink(hl, fso) Then Set target = hl: Exit For
+            Next hl
+            If Not target Is Nothing Then Exit For
+        Next c
+    End If
     If target Is Nothing Then
         MsgBox "选区内未发现附件链接。请选中要更新版本的附件链接单元格。", vbInformation, "AttachLink"
         Exit Sub
@@ -1144,8 +1204,8 @@ Public Sub AttachLink_UpdateVersion()
     ' meta: 0=哈希 1=版本 2=登记时间 3=更新时间
 
     ' 选择新文件
-    Dim fd As FileDialog
-    Set fd = Application.FileDialog(msoFileDialogFilePicker)
+    Dim fd As Object
+    Set fd = Application.FileDialog(3)
     With fd
         .Title = "选择替换「" & fName & "」的新版本文件（v" & (CLng(meta(1)) + 1) & "）"
         .AllowMultiSelect = False
@@ -1208,60 +1268,256 @@ Public Function AttachLink_GetVersion() As String
 End Function
 
 '====================== 内容基线（SHA-256）辅助 ======================
-' 声明见模块顶部声明区（WinCrypt Declare 必须位于第一条过程之前，位置规则
-' 见顶部注释与 WORKLOG #15）
-
-' 计算文件 SHA-256（十六进制小写64位）；失败返回 ""（调用方显示「校验不可用」）
+' SHA-256 经系统 certutil 实现（WPS 兼容决策，2026-11-21）：WPS 的 VBA 环境缺少
+' LongPtr/PtrSafe 生态，CAPI Declare 触发「用户定义类型未定义」编译错误且按需
+' 编译会连带击穿调用链（清单/插入文件夹）。certutil 为 Windows 内置命令
+' （Win7+），经 WScript.Shell 隐藏窗口执行、输出落临时文件解析，无任何宿主
+' 类型依赖。代价：单文件约 50ms 进程开销（体检几十个附件数秒级，可接受；
+' 后续优化见开发交接 T14 哈希缓存）。
 Private Function Sha256File(ByVal filePath As String) As String
-    Dim hProv As LongPtr, hHash As LongPtr, stm As Object
-    Dim bytes As Variant, arr() As Byte, n As Long, hashBytes() As Byte, hashLen As Long
-    Dim i As Long, s As String
-    Const PROV_RSA_AES As Long = 24                ' SHA-256 需要 AES CSP；PROV_RSA_FULL 会报 NTE_BAD_ALG_ID(0x80090008)
-    Const CRYPT_VERIFYCONTEXT As Long = &HF0000000
-    Const CALG_SHA_256 As Long = &H800C&           ' 注意：尾部 & 必不可少。VBA 把 >= &H8000 的字面量解析为
-                                                    ' 负 Integer，符号扩展后变 0xFFFF800C，导致 NTE_BAD_ALG_ID（实测踩坑）
-    Const HP_HASHVAL As Long = 2
-    Const CHUNK As Long = 65536
-    On Error GoTo Fail
-    Sha256File = ""
-    If CryptAcquireContextW(hProv, 0, 0, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) = 0 Then GoTo RelAll
-    If CryptCreateHash(hProv, CALG_SHA_256, 0, 0, hHash) = 0 Then GoTo RelProv
-    Set stm = CreateObject("ADODB.Stream")
-    With stm
-        .Type = 1                                   ' adTypeBinary
-        .Open
-        .LoadFromFile filePath
-        .Position = 0
-        Do While Not .EOS
-            bytes = .Read(CHUNK)
-            arr = bytes                             ' Variant(Byte()) → 类型化数组：VarPtr 必须作用于类型化数组元素
-            n = UBound(arr) - LBound(arr) + 1
-            If CryptHashData(hHash, VarPtr(arr(LBound(arr))), n, 0) = 0 Then GoTo RelAll
-        Loop
-        .Close
-    End With
-    hashLen = 32
-    ReDim hashBytes(0 To 31)
-    If CryptGetHashParam(hHash, HP_HASHVAL, VarPtr(hashBytes(0)), hashLen, 0) = 0 Then GoTo RelAll
-    For i = 0 To 31
-        s = s & Right$("0" & Hex$(hashBytes(i)), 2)
-    Next i
-    Sha256File = LCase$(s)
-RelAll:
-    On Error Resume Next
-    If Not stm Is Nothing Then stm.Close
-    On Error GoTo Fail
-    If hHash <> 0 Then CryptDestroyHash hHash
-RelProv:
-    If hProv <> 0 Then CryptReleaseContext hProv, 0
-    Exit Function
-Fail:
-    Resume RelAll
+    ' 宿主分派（2026-11-21）：WPS 宏安全拦截子进程创建（0x80070005）→ 纯 VBA；
+    ' Excel 走 certutil（快）。互为回退：任一路径失败自动尝试另一条（oracle：宿主误判/环境异常时兜底）
+    Dim h As String
+    If IsWpsHost() Then
+        h = Sha256VBA(filePath)
+        If Len(h) = 0 Then h = Sha256Certutil(filePath)
+    Else
+        h = Sha256Certutil(filePath)
+        If Len(h) = 0 Then h = Sha256VBA(filePath)
+    End If
+    Sha256File = h
 End Function
 
-' 读取内容基线为字典（键=附件夹内相对子路径小写，值=「哈希|版本|登记时间|更新时间」）。
-' 兼容旧 v1 格式（仅「路径|哈希」两字段）自动按版本 1 迁移。
-' 基线不存在/损坏时返回空字典（不中断清单）
+' 宿主判定：WPS 安装路径含 kingsoft/wps（Application.Name 在 WPS 伪装为 Excel 不可靠）
+Private Function IsWpsHost() As Boolean
+    On Error Resume Next
+    Dim p As String
+    p = Application.Path
+    IsWpsHost = (InStr(1, p, "kingsoft", vbTextCompare) > 0) Or (InStr(1, p, "wps", vbTextCompare) > 0)
+End Function
+
+Private Function Sha256Certutil(ByVal filePath As String) As String
+    On Error GoTo Fail
+    Sha256Certutil = ""
+    Dim fso As Object, tmp As String, sh As Object, cmd As String, rc As Long
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    ' 唯一临时文件（oracle：固定名在多 Excel 并发体检时会互相覆盖/读到旧结果，串哈希属证据正确性问题）
+    tmp = Environ$("TEMP") & "\" & fso.GetTempName
+    ' chcp 65001：中文路径下 certutil 标题行按 UTF-8 输出避免管道乱码；哈希行为纯 ASCII
+    cmd = "cmd /c chcp 65001>nul & certutil -hashfile """ & filePath & """ SHA256>""" & tmp & """ 2>nul"
+    Set sh = CreateObject("WScript.Shell")
+    rc = sh.Run(cmd, 0, True)                             ' 隐藏窗口 + 等待完成；返回退出码
+    If rc <> 0 Then GoTo Cleanup                          ' 命令失败不得解析历史文件
+    If Not fso.FileExists(tmp) Then GoTo Cleanup
+    ' 解析：找首个 64 位十六进制行
+    Dim stm As Object, text As String, lines() As String, i As Long, line As String
+    Dim j As Long, hexOk As Boolean, ch As String
+    Set stm = CreateObject("ADODB.Stream")
+    With stm
+        .Type = 2
+        .Charset = "UTF-8"
+        .Open
+        .LoadFromFile tmp
+        .Position = 0
+        text = .ReadText
+        .Close
+    End With
+    lines = Split(text, vbLf)
+    For i = 0 To UBound(lines)
+        line = UCase$(Replace(Replace(lines(i), vbCr, ""), " ", ""))
+        If Len(line) = 64 Then
+            hexOk = True
+            For j = 1 To 64
+                ch = Mid$(line, j, 1)
+                If InStr("0123456789ABCDEF", ch) = 0 Then hexOk = False: Exit For
+            Next j
+    If hexOk Then Sha256Certutil = LCase$(line): Exit For
+        End If
+    Next i
+Cleanup:
+    On Error Resume Next
+    fso.DeleteFile tmp, True                              ' 成功/失败均清理
+    On Error GoTo 0
+    Exit Function
+Fail:
+    Sha256Certutil = ""
+    Resume Cleanup                                     ' 异常路径同样清理临时文件（oracle 复验）
+End Function
+
+' ---- 纯 VBA SHA-256（WPS 路径；无任何外部依赖/Declare）----
+' 性能预期约 0.3~1 MB/s（VBA 解释循环）：小附件秒级，数 MB 附件十秒级——
+' WPS 场景登记为一次性成本，可接受；Excel 不走此路径。
+Private Function Sha256VBA(ByVal filePath As String) As String
+    On Error GoTo Fail
+    Sha256VBA = ""
+    ' 读入全文件
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    ' 空文件特判：直接返回标准 SHA-256（e3b0c442...），避免 ADODB 空 Read 的 UBound 失败
+    If fso.GetFile(filePath).Size = 0 Then
+        Sha256VBA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        Exit Function
+    End If
+    ' 大文件护栏（oracle 建议）：全文件读入 + 约 0.3~1MB/s，超 50MB 直接降级「校验不可用」
+    If fso.GetFile(filePath).Size > 52428800 Then Exit Function
+    Dim stm As Object, bytes As Variant
+    Set stm = CreateObject("ADODB.Stream")
+    stm.Type = 1
+    stm.Open
+    stm.LoadFromFile filePath
+    stm.Position = 0
+    bytes = stm.Read
+    stm.Close
+    Dim n As Long
+    n = UBound(bytes) - LBound(bytes) + 1
+
+    ' 消息填充：msg = data + &H80 + 零 + 8 字节大端位长（512 对齐）
+    Dim totalLen As Double
+    totalLen = CDbl(n) * 8#
+    Dim padded As Long
+    padded = ((n + 8) \ 64 + 1) * 64
+    Dim msg() As Byte
+    ReDim msg(0 To padded - 1)
+    Dim i As Long
+    For i = 0 To n - 1
+        msg(i) = bytes(i)
+    Next i
+    msg(n) = 128
+    For i = 0 To 7
+        msg(padded - 1 - i) = CByte(Int(totalLen / (256# ^ i)) - Int(Int(totalLen / (256# ^ i)) / 256#) * 256#)
+    Next i
+
+    ' 初始哈希
+    Dim h0 As Long, h1 As Long, h2 As Long, h3 As Long, h4 As Long, h5 As Long, h6 As Long, h7 As Long
+    h0 = &H6A09E667: h1 = &HBB67AE85: h2 = &H3C6EF372: h3 = &HA54FF53A
+    h4 = &H510E527F: h5 = &H9B05688C: h6 = &H1F83D9AB: h7 = &H5BE0CD19
+
+    ' 常量 K
+    Dim K(0 To 63) As Long
+    K(0) = &H428A2F98: K(1) = &H71374491: K(2) = &HB5C0FBCF: K(3) = &HE9B5DBA5
+    K(4) = &H3956C25B: K(5) = &H59F111F1: K(6) = &H923F82A4: K(7) = &HAB1C5ED5
+    K(8) = &HD807AA98: K(9) = &H12835B01: K(10) = &H243185BE: K(11) = &H550C7DC3
+    K(12) = &H72BE5D74: K(13) = &H80DEB1FE: K(14) = &H9BDC06A7: K(15) = &HC19BF174
+    K(16) = &HE49B69C1: K(17) = &HEFBE4786: K(18) = &HFC19DC6: K(19) = &H240CA1CC
+    K(20) = &H2DE92C6F: K(21) = &H4A7484AA: K(22) = &H5CB0A9DC: K(23) = &H76F988DA
+    K(24) = &H983E5152: K(25) = &HA831C66D: K(26) = &HB00327C8: K(27) = &HBF597FC7
+    K(28) = &HC6E00BF3: K(29) = &HD5A79147: K(30) = &H6CA6351: K(31) = &H14292967
+    K(32) = &H27B70A85: K(33) = &H2E1B2138: K(34) = &H4D2C6DFC: K(35) = &H53380D13
+    K(36) = &H650A7354: K(37) = &H766A0ABB: K(38) = &H81C2C92E: K(39) = &H92722C85
+    K(40) = &HA2BFE8A1: K(41) = &HA81A664B: K(42) = &HC24B8B70: K(43) = &HC76C51A3
+    K(44) = &HD192E819: K(45) = &HD6990624: K(46) = &HF40E3585: K(47) = &H106AA070
+    K(48) = &H19A4C116: K(49) = &H1E376C08: K(50) = &H2748774C: K(51) = &H34B0BCB5
+    K(52) = &H391C0CB3: K(53) = &H4ED8AA4A: K(54) = &H5B9CCA4F: K(55) = &H682E6FF3
+    K(56) = &H748F82EE: K(57) = &H78A5636F: K(58) = &H84C87814: K(59) = &H8CC70208
+    K(60) = &H90BEFFFA: K(61) = &HA4506CEB: K(62) = &HBEF9A3F7: K(63) = &HC67178F2
+
+    ' 分块处理
+    Dim blk As Long, w(0 To 63) As Long
+    Dim a As Long, b As Long, cc As Long, d As Long, e As Long, f As Long, g As Long, hh As Long
+    Dim t1 As Long, t2 As Long, j As Long, off As Long
+    For blk = 0 To padded - 1 Step 64
+        off = blk
+        For j = 0 To 15
+            w(j) = DblToLong(CDbl(msg(off)) * 16777216# + CDbl(msg(off + 1)) * 65536# + CDbl(msg(off + 2)) * 256# + CDbl(msg(off + 3)))
+            off = off + 4
+        Next j
+        For j = 16 To 63
+            w(j) = Add32(Add32(Sig1(w(j - 2)), w(j - 7)), Add32(Sig0(w(j - 15)), w(j - 16)))
+        Next j
+        a = h0: b = h1: cc = h2: d = h3: e = h4: f = h5: g = h6: hh = h7
+        For j = 0 To 63
+            t1 = Add32(Add32(Add32(Add32(Ep1(e), Ch(e, f, g)), hh), K(j)), w(j))
+            t2 = Add32(Ep0(a), Maj(a, b, cc))
+            hh = g: g = f: f = e
+            e = Add32(d, t1)
+            d = cc: cc = b: b = a
+            a = Add32(t1, t2)
+        Next j
+        h0 = Add32(h0, a): h1 = Add32(h1, b): h2 = Add32(h2, cc): h3 = Add32(h3, d)
+        h4 = Add32(h4, e): h5 = Add32(h5, f): h6 = Add32(h6, g): h7 = Add32(h7, hh)
+    Next blk
+
+    Sha256VBA = LCase$(ToHex8(h0) & ToHex8(h1) & ToHex8(h2) & ToHex8(h3) & _
+                       ToHex8(h4) & ToHex8(h5) & ToHex8(h6) & ToHex8(h7))
+    Exit Function
+Fail:
+    Sha256VBA = ""
+End Function
+
+' ---- SHA-256 位运算辅助（Long 按补码，模 2^32；移位经 Double 中转避免负数整除方向错）----
+Private Function Add32(ByVal x As Long, ByVal y As Long) As Long
+    Dim dx As Double, dy As Double, s As Double
+    dx = x: If dx < 0 Then dx = dx + 4294967296#
+    dy = y: If dy < 0 Then dy = dy + 4294967296#
+    s = dx + dy
+    Do While s >= 4294967296#
+        s = s - 4294967296#
+    Loop
+    Add32 = DblToLong(s)
+End Function
+
+Private Function DblToLong(ByVal d As Double) As Long
+    If d >= 2147483648# Then d = d - 4294967296#
+    DblToLong = CLng(d)
+End Function
+
+Private Function Ch(ByVal x As Long, ByVal y As Long, ByVal z As Long) As Long
+    Ch = (x And y) Or ((Not x) And z)
+End Function
+
+Private Function Maj(ByVal x As Long, ByVal y As Long, ByVal z As Long) As Long
+    Maj = (x And y) Or (x And z) Or (y And z)
+End Function
+
+' 循环右移 n 位（无符号语义）
+Private Function Rotr(ByVal x As Long, ByVal n As Long) As Long
+    Dim d As Double, hi As Double, lo As Double, v As Double
+    d = x: If d < 0 Then d = d + 4294967296#
+    hi = Int(d / (2# ^ n))                       ' 高 32-n 位下移
+    lo = d - hi * (2# ^ n)                       ' 低 n 位
+    v = hi + lo * (2# ^ (32 - n))
+    Do While v >= 4294967296#
+        v = v - 4294967296#
+    Loop
+    Rotr = DblToLong(v)
+End Function
+
+' 逻辑右移 n 位（无符号语义）
+Private Function Shr(ByVal x As Long, ByVal n As Long) As Long
+    Dim d As Double
+    d = x: If d < 0 Then d = d + 4294967296#
+    Shr = DblToLong(Int(d / (2# ^ n)))
+End Function
+
+Private Function Ep0(ByVal x As Long) As Long
+    Ep0 = Rotr(x, 2) Xor Rotr(x, 13) Xor Rotr(x, 22)
+End Function
+
+Private Function Ep1(ByVal x As Long) As Long
+    Ep1 = Rotr(x, 6) Xor Rotr(x, 11) Xor Rotr(x, 25)
+End Function
+
+Private Function Sig0(ByVal x As Long) As Long
+    Sig0 = Rotr(x, 7) Xor Rotr(x, 18) Xor Shr(x, 3)
+End Function
+
+Private Function Sig1(ByVal x As Long) As Long
+    Sig1 = Rotr(x, 17) Xor Rotr(x, 19) Xor Shr(x, 10)
+End Function
+
+Private Function ToHex8(ByVal x As Long) As String
+    ' WPS 兼容：Hex$ 对 >=2^31 的数值会经 Long 转换而溢出（实测 E6）——
+    ' 按字节分段格式化，每段 0~255 永不溢出
+    Dim d As Double, s As String, i As Long, b As Double
+    d = x: If d < 0 Then d = d + 4294967296#
+    s = ""
+    For i = 3 To 0 Step -1
+        b = Int(d / (256# ^ i))
+        d = d - b * (256# ^ i)
+        s = s & Right$("0" & Hex$(CLng(b)), 2)
+    Next i
+    ToHex8 = s
+End Function
 Private Function LoadBaseline(ByVal fso As Object, ByVal attachDir As String) As Object
     Dim d As Object
     Set d = CreateObject("Scripting.Dictionary")
@@ -1357,7 +1613,7 @@ End Sub
 ' 前置检查（插入文件/文件夹共用）：附件文件夹不存在则自动创建；已存在则
 ' 提示核对（NOTICE_ONCE_PER_FOLDER 语义）。返回附件夹路径；用户取消或
 ' 创建失败返回 ""。
-Private Function EnsureAttachDirPrompted(ByVal fso As Object, ByVal wb As Workbook) As String
+Private Function EnsureAttachDirPrompted(ByVal fso As Object, ByVal wb As Object) As String
     Dim attachDir As String
     attachDir = wb.Path & "\" & ATTACH_FOLDER_NAME
     If fso.FolderExists(attachDir) Then
@@ -1389,7 +1645,7 @@ End Function
 ' 判断是否为本加载项插入的附件链接：
 ' 相对地址以「附件\」开头，或绝对路径的父目录名为附件文件夹
 ' fsoIn：可选传入调用方已建的 FSO 实例（保存归一化等高频路径下避免反复 CreateObject）
-Private Function IsAttachmentLink(ByVal hl As Hyperlink, Optional ByVal fsoIn As Object) As Boolean
+Private Function IsAttachmentLink(ByVal hl As Object, Optional ByVal fsoIn As Object) As Boolean
     Dim a As String
     a = hl.Address
     If Len(a) = 0 Then Exit Function
@@ -1421,8 +1677,8 @@ Private Function ResolveLinkPath(ByVal fso As Object, ByVal wbPath As String, By
 End Function
 
 ' 展开选区为单元格列表（行优先，合并格只保留左上角格）
-Private Function FlattenSelection(ByVal sel As Range) As Collection
-    Dim out As New Collection, area As Range, c As Range
+Private Function FlattenSelection(ByVal sel As Object) As Collection
+    Dim out As New Collection, area As Object, c As Object
     For Each area In sel.Areas
         For Each c In area.Cells
             If c.MergeCells Then
@@ -1441,7 +1697,7 @@ End Function
 Private Function ExtendCellList(ByVal cellList As Collection) As Boolean
     ExtendCellList = False
     If cellList.Count = 0 Then Exit Function
-    Dim lastCell As Range, r As Long, cand As Range
+    Dim lastCell As Object, r As Long, cand As Object
     Set lastCell = cellList(cellList.Count)
     For r = lastCell.Row + 1 To lastCell.Row + 200
         Set cand = lastCell.Worksheet.Cells(r, lastCell.Column)
@@ -1494,7 +1750,7 @@ Private Function ArchiveFile(ByVal fso As Object, ByVal srcPath As String, ByVal
     End If
 End Function
 
-Private Sub InsertLink(ByVal targetCell As Range, ByVal relAddr As String, ByVal disp As String)
+Private Sub InsertLink(ByVal targetCell As Object, ByVal relAddr As String, ByVal disp As String)
     ' 目标格已含超链接时 Hyperlinks.Add 会报 1004，先移除旧链接（保持“一格一链接”约定）
     If targetCell.Hyperlinks.Count > 0 Then targetCell.Hyperlinks(1).Delete
     targetCell.Hyperlinks.Add Anchor:=targetCell, Address:=relAddr, TextToDisplay:=disp
@@ -1510,26 +1766,51 @@ Private Function DisplayName(ByVal fName As String, ByVal fso As Object) As Stri
 End Function
 
 ' 取得（或创建）附件清单表。
-' 同名表存在但缺少本工具归属标记（CustomProperties）时返回 Nothing，
+' 同名表存在但缺少本工具归属标记（CustomProperties，WPS 不支持时回退
+' sheet 级名称标记 _AttachLinkIndex）时返回 Nothing，
 ' 防止整表重建误清用户或鼎信诺生成的同名表。
-Private Function GetOrCreateIndexSheet(ByVal wb As Workbook) As Worksheet
-    Dim ws As Worksheet, cp As CustomProperty, marked As Boolean
+Private Function GetOrCreateIndexSheet(ByVal wb As Object) As Object
+    Dim ws As Object
     On Error Resume Next
     Set ws = wb.Worksheets(INDEX_SHEET_NAME)
     On Error GoTo 0
     If ws Is Nothing Then
         Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
         ws.Name = INDEX_SHEET_NAME
-        ws.CustomProperties.Add "AttachLinkIndex", "1"
+        MarkIndexSheet ws
     Else
-        For Each cp In ws.CustomProperties
-            If StrComp(cp.Name, "AttachLinkIndex", vbTextCompare) = 0 Then marked = True
-        Next cp
-        If Not marked Then
+        If Not IndexSheetMarked(ws) Then
             Exit Function
         End If
     End If
     Set GetOrCreateIndexSheet = ws
+End Function
+
+' 写入归属标记：CustomProperties（Excel）+ sheet 级名称（WPS 兼容回退），两者都试
+Private Sub MarkIndexSheet(ByVal ws As Object)
+    On Error Resume Next
+    ws.CustomProperties.Add "AttachLinkIndex", "1"
+    Err.Clear
+    ws.Names.Add "_AttachLinkIndex", "=""1"""
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+' 读取归属标记：CustomProperties 优先；宿主不支持或未写入时查名称标记
+Private Function IndexSheetMarked(ByVal ws As Object) As Boolean
+    Dim cp As Object
+    On Error Resume Next
+    For Each cp In ws.CustomProperties
+        If StrComp(cp.Name, "AttachLinkIndex", vbTextCompare) = 0 Then
+            IndexSheetMarked = True
+            Exit Function
+        End If
+    Next cp
+    Err.Clear
+    Dim nm As Object
+    Set nm = Nothing
+    Set nm = ws.Names("_AttachLinkIndex")
+    IndexSheetMarked = Not (nm Is Nothing)
 End Function
 
 ' 归档迁移：把工作簿中所有「指向别处」的附件链接改写为相对地址（附件\文件名）。
@@ -1538,8 +1819,8 @@ End Function
 ' 内的附件链接，一律按文件名改写为「附件\文件名」（与本工具「附件平铺、
 ' 一格一链」的写入形态一致）。
 ' 返回改写数量；遇到受保护工作表等错误时抛出，由调用方记入失败清单。
-Private Function RewriteAbsoluteAttachLinks(ByVal wb As Workbook, ByVal fso As Object) As Long
-    Dim ws As Worksheet, hl As Hyperlink, a As String, full As String
+Private Function RewriteAbsoluteAttachLinks(ByVal wb As Object, ByVal fso As Object) As Long
+    Dim ws As Object, hl As Object, a As String, full As String
     Dim parentDir As String, localAttach As String, n As Long
     On Error GoTo Fail
     localAttach = wb.Path & "\" & ATTACH_FOLDER_NAME
@@ -1612,9 +1893,9 @@ End Function
 
 ' 归档迁移：扫描工作簿中绝对地址的附件链接，返回出现次数最多的附件目录
 ' （带尾部反斜杠，作为源目录选择器的建议值）；没有则返回空串
-Private Function SuggestAttachSource(ByVal wb As Workbook, ByVal fso As Object) As String
+Private Function SuggestAttachSource(ByVal wb As Object, ByVal fso As Object) As String
     On Error Resume Next
-    Dim ws As Worksheet, hl As Hyperlink, dirs As Object, p As String
+    Dim ws As Object, hl As Object, dirs As Object, p As String
     Set dirs = CreateObject("Scripting.Dictionary")
     For Each ws In wb.Worksheets
         For Each hl In ws.Hyperlinks
@@ -1638,8 +1919,8 @@ End Function
 
 ' 按完整路径在已打开工作簿中查找（找不到返回 Nothing）。
 ' 归档迁移用它区分「归档件已打开（就地处理）」与「账套同名原件已打开（互不影响）」
-Private Function WorkbookByPath(ByVal fullPath As String) As Workbook
-    Dim w As Workbook
+Private Function WorkbookByPath(ByVal fullPath As String) As Object
+    Dim w As Object
     For Each w In Application.Workbooks
         If StrComp(w.FullName, fullPath, vbTextCompare) = 0 Then
             Set WorkbookByPath = w
@@ -1649,7 +1930,7 @@ Private Function WorkbookByPath(ByVal fullPath As String) As Workbook
 End Function
 
 ' 清除单个单元格上的附件链接；清完无残留链接时恢复字体格式
-Private Function ClearCellLinks(ByVal c As Range) As Long
+Private Function ClearCellLinks(ByVal c As Object) As Long
     Dim i As Long, removed As Long
     For i = c.Hyperlinks.Count To 1 Step -1
         If IsAttachmentLink(c.Hyperlinks(i)) Then
@@ -1660,8 +1941,8 @@ Private Function ClearCellLinks(ByVal c As Range) As Long
     If removed > 0 Then
         If c.Hyperlinks.Count = 0 Then
             With c.Font
-                .Underline = xlUnderlineStyleNone
-                .ColorIndex = xlColorIndexAutomatic
+                .Underline = (-4142)
+                .ColorIndex = (-4105)
             End With
         End If
     End If
