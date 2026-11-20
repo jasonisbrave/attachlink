@@ -51,11 +51,12 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 ' 附件清单工作表名
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.3.1：右键菜单再浓缩（4 顶项：归档子菜单收编体检/断链修复，归档前后步骤统一入口）
 ' 1.3.0：WPS 表格支持（全量晚绑定改造，需宿主启用 VBA 环境）+ 重命名多选批量 + 安装器墓碑进程误报修复
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ⚠ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.3.0"
+Public Const ATTACHLINK_VERSION As String = "1.3.1"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"
@@ -132,22 +133,9 @@ Private Sub RegisterMenu(ByVal adding As Boolean)
         btn.OnAction = "AttachLink_RenameLink"
         btn.Tag = MENU_TAG
 
-        ' 二级菜单：附件清单（体检 / 断链修复）
+        ' 二级菜单：归档（迁移 / 体检 / 修复 / 版本更新——归档前后步骤统一入口，1.3.1 浓缩）
         Dim pop As Object, subBtn As Object
         Set pop = cb.Controls.Add(10, , , 4, True)
-        pop.Caption = "附件清单"
-        pop.Tag = MENU_TAG
-        Set subBtn = pop.Controls.Add(1, , , 1, True)
-        subBtn.Caption = "附件清单 / 体检"
-        subBtn.OnAction = "AttachLink_BuildIndex"
-        subBtn.Tag = MENU_TAG
-        Set subBtn = pop.Controls.Add(1, , , 2, True)
-        subBtn.Caption = "附件断链修复"
-        subBtn.OnAction = "AttachLink_Repair"
-        subBtn.Tag = MENU_TAG
-
-        ' 二级菜单：归档（迁移 / 版本更新）
-        Set pop = cb.Controls.Add(10, , , 5, True)
         pop.Caption = "归档"
         pop.Tag = MENU_TAG
         Set subBtn = pop.Controls.Add(1, , , 1, True)
@@ -155,6 +143,14 @@ Private Sub RegisterMenu(ByVal adding As Boolean)
         subBtn.OnAction = "AttachLink_ArchiveMigrate"
         subBtn.Tag = MENU_TAG
         Set subBtn = pop.Controls.Add(1, , , 2, True)
+        subBtn.Caption = "附件清单 / 体检"
+        subBtn.OnAction = "AttachLink_BuildIndex"
+        subBtn.Tag = MENU_TAG
+        Set subBtn = pop.Controls.Add(1, , , 3, True)
+        subBtn.Caption = "附件断链修复"
+        subBtn.OnAction = "AttachLink_Repair"
+        subBtn.Tag = MENU_TAG
+        Set subBtn = pop.Controls.Add(1, , , 4, True)
         subBtn.Caption = "附件版本更新"
         subBtn.OnAction = "AttachLink_UpdateVersion"
         subBtn.Tag = MENU_TAG
