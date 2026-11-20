@@ -21,7 +21,11 @@
 param(
     [string]$XlamPath = (Join-Path $env:APPDATA 'Microsoft\AddIns\AttachLink.xlam'),
     [int]$IntervalSeconds = 2,
-    [int]$MaxCycles = 0
+    [int]$MaxCycles = 0,
+    # 父进程白名单（逗号分隔进程名，如 "sjp7.exe"）：仅附着由这些进程拉起的 Excel。
+    # 空 = 不过滤（默认，保持既有行为）。未指定参数时读取脚本同目录 watchdog.conf
+    # 的 ParentAllowlist= 行（install-elevated.ps1 -WatchdogParentFilter 部署时写入）。
+    [string]$ParentAllowlist = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -29,6 +33,21 @@ $logFile = Join-Path $env:TEMP 'AttachLinkWatchdog.log'
 
 function WdLog([string]$m) {
     try { [IO.File]::AppendAllText($logFile, (Get-Date -Format 'HH:mm:ss') + ' ' + $m + "`r`n") } catch {}
+}
+
+# 生效的父进程过滤：参数优先，其次配置文件
+$effectiveFilter = $ParentAllowlist
+if (-not $effectiveFilter) {
+    $conf = Join-Path $PSScriptRoot 'watchdog.conf'
+    if (Test-Path $conf) {
+        $line = (Get-Content $conf -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\s*ParentAllowlist\s*=' }) | Select-Object -First 1
+        if ($line) { $effectiveFilter = ($line -replace '^\s*ParentAllowlist\s*=', '').Trim() }
+    }
+}
+$filterSet = @()
+if ($effectiveFilter) {
+    $filterSet = ($effectiveFilter -split ',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ }
+    WdLog ("父进程白名单生效: " + ($filterSet -join ', '))
 }
 
 # 编码要求：本文件必须保存为 UTF-8 with BOM（PS 5.1 对无 BOM 文件按 ANSI/GBK
@@ -56,6 +75,9 @@ namespace AttachLinkWatchdog
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
 
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+
         [DllImport("oleacc.dll")]
         private static extern int AccessibleObjectFromWindow(IntPtr h, uint dwId, ref Guid riid,
             [MarshalAs(UnmanagedType.IUnknown)] out object ppvObject);
@@ -68,6 +90,14 @@ namespace AttachLinkWatchdog
             var sb = new StringBuilder(64);
             GetClassName(h, sb, 64);
             return sb.ToString() == cls;
+        }
+
+        // EXCEL7 窗口所属进程 PID（父进程白名单过滤用）
+        public static long GetWindowProcessId(long hwnd)
+        {
+            uint pid;
+            GetWindowThreadProcessId(new IntPtr(hwnd), out pid);
+            return pid;
         }
 
         // 枚举 XLMAIN 顶层窗口下的 EXCEL7 文档窗口句柄
@@ -159,18 +189,41 @@ while ($true) {
         $wins = [AttachLinkWatchdog.Native]::FindExcel7Windows()
         WdLog ("cycle " + $cycle + ": EXCEL7 窗口数=" + $wins.Count)
         foreach ($h in $wins) {
-            $key = [string]$h
+            $key = [string]$h + ':' + [AttachLinkWatchdog.Native]::GetWindowProcessId($h)
             if ($seen.ContainsKey($key)) { continue }
             try {
                 $app = [AttachLinkWatchdog.Native]::GetApplicationFromWindow($h)
                 if ($null -eq $app) { WdLog ("hwnd=" + $h + " 未取得 Application"); continue }
+
+                # 父进程白名单：仅附着白名单进程拉起的 Excel（风险收敛，见仓库 Issue #1 / T13）
+                if ($filterSet.Count -gt 0) {
+                    $excelPid2 = [int]($key -replace '^\d+:', '')
+                    $parentObj = Get-CimInstance Win32_Process -Filter "ProcessId=$excelPid2" -ErrorAction SilentlyContinue
+                    $pname = ""
+                    if ($parentObj -and $parentObj.ParentProcessId) {
+                        $pname = (Get-CimInstance Win32_Process -Filter "ProcessId=$($parentObj.ParentProcessId)" -ErrorAction SilentlyContinue).Name
+                    }
+                    if (-not $pname) {
+                        # 父进程查询失败（CIM/WMI 临时故障）：本周期跳过且【不标 seen】，待下轮重查
+                        WdLog ("hwnd=" + $h + " 父进程未知，本周期跳过（不缓存，下轮重查）")
+                        continue
+                    }
+                    if ($filterSet -notcontains $pname.ToLowerInvariant()) {
+                        $seen[$key] = $true
+                        WdLog ("跳过 hwnd=" + $h + "：父进程 " + $pname + " 不在白名单")
+                        continue
+                    }
+                }
+
                 if (Provision-App $app) {
                     # xlam 装载发生在工作簿打开之后，初始化时序已错过，显式补一次（幂等）
                     try { $null = $app.Run('AttachLink_Initialize') }
                     catch { WdLog ("Run AttachLink_Initialize 失败: " + $_.Exception.Message) }
                     if (Menu-Exists $app) {
                         $seen[$key] = $true
-                        WdLog ("已装载并初始化: hwnd=" + $h)
+                        $ver = ""
+                        try { $ver = $app.Run('AttachLink_GetVersion') } catch {}
+                        WdLog ("已装载并初始化: hwnd=" + $h + $(if ($ver) { " 版本=v" + $ver } else { "" }))
                     } else {
                         WdLog ("装载后未检测到菜单, hwnd=" + $h + "（下轮重试）")
                     }

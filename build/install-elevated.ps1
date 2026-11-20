@@ -24,7 +24,13 @@
 # 前置：普通用户级安装（install.ps1）已完成——本脚本只负责鼎信诺场景的
 # 看门狗；日常双击打开的 Excel 由用户级安装直接覆盖。
 # =====================================================================
-param([switch]$Uninstall)
+param(
+    [switch]$Uninstall,
+    # 看门狗父进程白名单（逗号分隔进程名，如 "sjp7.exe"）：仅附着由这些进程拉起的 Excel，
+    # 收敛无差别装载面（Issue #1 / T13）。默认空 = 不过滤（保持既有行为）。
+    # 部署后也可直接编辑 C:\Program Files\AttachLink\watchdog.conf（ParentAllowlist= 行）。
+    [string]$WatchdogParentFilter = ''
+)
 
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
@@ -89,6 +95,15 @@ if (-not $Uninstall) {
     Copy-Item $srcWd    (Join-Path $machineDir 'watchdog.ps1') -Force
     Copy-Item $srcVbs   (Join-Path $machineDir 'watchdog_launcher.vbs') -Force
     Get-ChildItem $machineDir -File | ForEach-Object { Unblock-File $_.FullName -ErrorAction SilentlyContinue }
+
+    # ---- 1b) 看门狗父进程过滤配置（可选） ----
+    $confPath = Join-Path $machineDir 'watchdog.conf'
+    if ($WatchdogParentFilter) {
+        "ParentAllowlist=$WatchdogParentFilter" | Set-Content -Path $confPath -Encoding ASCII
+        Write-Host "看门狗父进程白名单已写入：$WatchdogParentFilter（仅附着这些进程拉起的 Excel；清空删除 watchdog.conf 即恢复不过滤）"
+    } else {
+        Remove-Item $confPath -Force -ErrorAction SilentlyContinue
+    }
 
     # ---- 2) HKLM 受信任位置（仅该目录本身；AllowSubFolders=0 最小信任范围）----
     New-Item -Path $tl -Force | Out-Null

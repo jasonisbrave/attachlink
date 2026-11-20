@@ -6,6 +6,11 @@ Attribute VB_Name = "AttachLink"
 '   1. 插入附件链接：前置检查附件文件夹（无则自动创建；已有则提示核对）
 '      -> 多选文件 -> 自动归档复制到底稿同级「附件」文件夹
 '      -> 以相对路径在选中单元格插入超链接（底稿文件夹整体搬移不断链）
+'      -> 对话框自动定位到上次选取附件的源目录（会话级记忆）
+'   1b. 插入文件夹引用：选定文件夹整体复制入附件夹 + 相对链接（点击即
+'      在资源管理器打开）；夹内全部文件自动纳入内容基线（可检测篡改）
+'   1c. 重命名链接显示名：只改超链接显示文本（应对收到的文件命名不规
+'      范），不改动文件本身与链接地址
 '   2. 附件清单/体检：按底稿 sheet 分组编号（sheet名-01），
 '      检查每个附件是否存在（断链红字）+ SHA-256 内容基线校验
 '      （基线存附件夹内 _attachlink_baseline.csv，随附件夹迁移/同步；
@@ -42,9 +47,10 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 ' 附件清单工作表名
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
-' 1.1.1：安装器 UX——成功弹窗明确「安装成功，重启 Excel 生效」；失败自动打开日志文件
+' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
+' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ⚠ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.1.1"
+Public Const ATTACHLINK_VERSION As String = "1.2.1"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"
@@ -76,6 +82,8 @@ Private Declare Function CryptDestroyHash Lib "advapi32" (ByVal hHash As Long) A
 
 ' 上次已提示过「已存在」的附件文件夹路径（会话级记忆，避免重复打扰）
 Private lastNotifiedAttachDir As String
+' 上次选取附件/文件夹的源目录（会话级记忆：插入对话框优先定位到这里，不再每次落在附件夹）
+Private lastSourceDir As String
 
 '============================ 注册与注销 ==============================
 Public Sub Auto_Open()
@@ -125,24 +133,41 @@ Private Sub RegisterMenu(ByVal adding As Boolean)
         btn.BeginGroup = True
 
         Set btn = cb.Controls.Add(msoControlButton, , , 2, True)
-        btn.Caption = "附件清单 / 体检"
-        btn.OnAction = "AttachLink_BuildIndex"
+        btn.Caption = "插入文件夹引用"
+        btn.OnAction = "AttachLink_InsertFolder"
         btn.Tag = MENU_TAG
 
         Set btn = cb.Controls.Add(msoControlButton, , , 3, True)
-        btn.Caption = "附件断链修复"
-        btn.OnAction = "AttachLink_Repair"
+        btn.Caption = "重命名链接显示名"
+        btn.OnAction = "AttachLink_RenameLink"
         btn.Tag = MENU_TAG
 
-        Set btn = cb.Controls.Add(msoControlButton, , , 4, True)
-        btn.Caption = "归档迁移（批量）"
-        btn.OnAction = "AttachLink_ArchiveMigrate"
-        btn.Tag = MENU_TAG
+        ' 二级菜单：附件清单（体检 / 断链修复）
+        Dim pop As CommandBarPopup, subBtn As CommandBarButton
+        Set pop = cb.Controls.Add(msoControlPopup, , , 4, True)
+        pop.Caption = "附件清单"
+        pop.Tag = MENU_TAG
+        Set subBtn = pop.Controls.Add(msoControlButton, , , 1, True)
+        subBtn.Caption = "附件清单 / 体检"
+        subBtn.OnAction = "AttachLink_BuildIndex"
+        subBtn.Tag = MENU_TAG
+        Set subBtn = pop.Controls.Add(msoControlButton, , , 2, True)
+        subBtn.Caption = "附件断链修复"
+        subBtn.OnAction = "AttachLink_Repair"
+        subBtn.Tag = MENU_TAG
 
-        Set btn = cb.Controls.Add(msoControlButton, , , 5, True)
-        btn.Caption = "附件版本更新"
-        btn.OnAction = "AttachLink_UpdateVersion"
-        btn.Tag = MENU_TAG
+        ' 二级菜单：归档（迁移 / 版本更新）
+        Set pop = cb.Controls.Add(msoControlPopup, , , 5, True)
+        pop.Caption = "归档"
+        pop.Tag = MENU_TAG
+        Set subBtn = pop.Controls.Add(msoControlButton, , , 1, True)
+        subBtn.Caption = "归档迁移（批量）"
+        subBtn.OnAction = "AttachLink_ArchiveMigrate"
+        subBtn.Tag = MENU_TAG
+        Set subBtn = pop.Controls.Add(msoControlButton, , , 2, True)
+        subBtn.Caption = "附件版本更新"
+        subBtn.OnAction = "AttachLink_UpdateVersion"
+        subBtn.Tag = MENU_TAG
     End If
 End Sub
 
@@ -174,27 +199,8 @@ Public Sub AttachLink_Insert()
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     Dim attachDir As String
-    attachDir = wb.Path & "\" & ATTACH_FOLDER_NAME
-
-    ' 前置检查：附件文件夹不存在则自动创建；已存在则提示核对
-    If fso.FolderExists(attachDir) Then
-        If (Not NOTICE_ONCE_PER_FOLDER) Or StrComp(lastNotifiedAttachDir, attachDir, vbTextCompare) <> 0 Then
-            If MsgBox("当前底稿同级已存在「" & ATTACH_FOLDER_NAME & "」文件夹：" & vbCrLf & _
-                      attachDir & vbCrLf & vbCrLf & _
-                      "本次插入的附件将归档复制到该文件夹，请先核对是否为目标目录。" & vbCrLf & vbCrLf & _
-                      "「确定」继续选择附件　　「取消」退出本次插入", _
-                      vbOKCancel + vbExclamation, "AttachLink") <> vbOK Then Exit Sub
-            lastNotifiedAttachDir = attachDir
-        End If
-    Else
-        If Not EnsureFolder(fso, attachDir) Then
-            MsgBox "无法创建附件文件夹：" & attachDir, vbCritical, "AttachLink"
-            Exit Sub
-        End If
-        lastNotifiedAttachDir = attachDir
-        MsgBox "当前底稿同级不存在「" & ATTACH_FOLDER_NAME & "」文件夹，已自动创建：" & vbCrLf & attachDir, _
-               vbInformation, "AttachLink"
-    End If
+    attachDir = EnsureAttachDirPrompted(fso, wb)
+    If Len(attachDir) = 0 Then Exit Sub
 
     Dim fd As FileDialog
     Set fd = Application.FileDialog(msoFileDialogFilePicker)
@@ -203,9 +209,15 @@ Public Sub AttachLink_Insert()
         .AllowMultiSelect = True
         .Filters.Clear
         .Filters.Add "所有文件", "*.*"
-        .InitialFileName = attachDir & "\"
+        ' 优先定位到上次选取附件的源目录（会话级记忆），避免每次翻找
+        If Len(lastSourceDir) > 0 Then
+            .InitialFileName = lastSourceDir & "\"
+        Else
+            .InitialFileName = attachDir & "\"
+        End If
         If .Show <> -1 Then Exit Sub
     End With
+    lastSourceDir = fso.GetParentFolderName(fd.SelectedItems(1))
 
     Dim cellList As Collection
     Set cellList = FlattenSelection(Selection)
@@ -334,7 +346,41 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
                         linkPath = ResolveLinkPath(fso, wb.Path, hl.Address)
                         ok = fso.FileExists(linkPath)
                         cellF = "—"
-                        If ok Then
+                        cellG = ""
+                        Dim isFolder As Boolean
+                        isFolder = False
+                        If Not ok Then isFolder = fso.FolderExists(linkPath)
+                        If isFolder Then
+                            wsIdx.Cells(r, 5).Value = "文件夹"
+                            wsIdx.Cells(r, 5).Font.Color = RGB(0, 102, 204)
+                            If StrComp(Left$(linkPath, Len(attachDir)), attachDir, vbTextCompare) <> 0 Then
+                                ' 外部文件夹（如归档前的指回链接）：仅查存在性，不校验基线（键无从落在本附件夹内）
+                                cellF = "外部，未校验"
+                            Else
+                                ' 夹内全部文件的内容基线体检（缺失自动登记 v1；哈希/遍历失败计入不可用）
+                                Dim fCnt As Long, fReg As Long, fBad As Long, fFail As Long
+                                fCnt = 0: fReg = 0: fBad = 0: fFail = 0
+                                CheckFolderBaseline fso, base, linkPath, attachDir, fReg, fCnt, fBad, fFail, baseDirty
+                                If fBad > 0 Then
+                                    ' oracle #2：内容变更优先于校验不可用——篡改红字绝不被遮蔽
+                                    cellF = "■ 内容变更"
+                                    changedCnt = changedCnt + 1
+                                    If fFail > 0 Then
+                                        cellF = "■ 内容变更（含不可用）"
+                                        unavailCnt = unavailCnt + 1
+                                    End If
+                                ElseIf fFail > 0 Then
+                                    cellF = "校验不可用"
+                                    unavailCnt = unavailCnt + 1
+                                ElseIf fCnt = 0 Then
+                                    cellF = "空文件夹"
+                                ElseIf fReg > 0 Then
+                                    cellF = "已登记 " & fCnt & " 文件"
+                                Else
+                                    cellF = fCnt & " 文件一致"
+                                End If
+                            End If
+                        ElseIf ok Then
                             wsIdx.Cells(r, 5).Value = "正常"
                             wsIdx.Cells(r, 5).Font.Color = RGB(0, 128, 0)
                             ' 内容基线校验（SHA-256；值=哈希|版本|登记时间|更新时间）
@@ -377,7 +423,7 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
                             brokenCnt = brokenCnt + 1
                         End If
                         wsIdx.Cells(r, 6).Value = cellF
-                        If cellF = "■ 内容变更" Then
+                        If Left$(cellF, 6) = "■ 内容变更" Then
                             wsIdx.Cells(r, 6).Font.Color = RGB(192, 0, 0)
                             wsIdx.Cells(r, 6).Font.Bold = True
                         ElseIf Left$(cellF, 2) = "一致" Or Left$(cellF, 3) = "已登记" Then
@@ -396,8 +442,11 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
         End If
     Next ws
 
-    ' 基线落盘（有新登记才写）
-    If baseDirty Then SaveBaseline fso, attachDir, base
+    ' 基线落盘（有新登记才写）；失败时汇总警告（登记未持久化，下次体检将重新登记）
+    Dim persistFail As Boolean
+    If baseDirty Then
+        If Not SaveBaseline(fso, attachDir, base) Then persistFail = True
+    End If
 
     ' 汇总行
     If total = 0 Then
@@ -443,6 +492,9 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Workbook) As String
             msg = msg & "，内容基线全部一致。"
         End If
     End If
+    If persistFail Then
+        msg = msg & vbCrLf & "⚠ 基线文件写入失败：本次新登记未持久化（" & BASELINE_FILE & "），下次体检将重新登记，请检查附件夹写权限。"
+    End If
     AttachLink_BuildIndexCore = msg
 End Function
 
@@ -465,15 +517,17 @@ Public Sub AttachLink_Repair()
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
 
-    ' 收集断链
+    ' 收集断链（oracle #1：文件夹的 FileExists 恒为 False，必须同时排除存在的文件夹，
+    ' 否则健康文件夹会被误列入修复并用源目录合并覆盖）
     Dim broken As Collection
     Set broken = New Collection
-    Dim ws As Worksheet, hl As Hyperlink
+    Dim ws As Worksheet, hl As Hyperlink, rp As String
     For Each ws In wb.Worksheets
         If StrComp(ws.Name, INDEX_SHEET_NAME, vbTextCompare) <> 0 Then
             For Each hl In ws.Hyperlinks
                 If IsAttachmentLink(hl, fso) Then
-                    If Not fso.FileExists(ResolveLinkPath(fso, wb.Path, hl.Address)) Then broken.Add hl
+                    rp = ResolveLinkPath(fso, wb.Path, hl.Address)
+                    If Not fso.FileExists(rp) And Not fso.FolderExists(rp) Then broken.Add hl
                 End If
             Next hl
         End If
@@ -513,6 +567,18 @@ Public Sub AttachLink_Repair()
             Else
                 missCnt = missCnt + 1
             End If
+        ElseIf fso.FolderExists(srcPath) Then
+            ' 文件夹引用的断链重连：整体复制（合并覆盖）到附件夹
+            On Error Resume Next
+            fso.CopyFolder srcPath, attachDir & "\" & fName, True
+            If Err.Number <> 0 Then
+                Err.Clear
+                missCnt = missCnt + 1
+            Else
+                hl.Address = ATTACH_FOLDER_NAME & "\" & fName
+                fixedCnt = fixedCnt + 1
+            End If
+            On Error GoTo Fail
         Else
             missCnt = missCnt + 1
         End If
@@ -578,6 +644,243 @@ Public Sub NormalizeAttachmentLinks(ByVal wb As Workbook)
             End If
         Next hl
     Next ws
+End Sub
+
+'============================ 1b. 插入文件夹引用 ======================
+' 把选定的文件夹整体复制到底稿同级「附件」夹内，并插入指向该文件夹副本的
+' 相对链接（点击即在资源管理器打开）。复制语义与文件附件一致（归档自包含）；
+' 夹内全部文件自动纳入内容基线（体检可检测夹内篡改）。
+Public Sub AttachLink_InsertFolder()
+    On Error GoTo Fail
+    Dim wb As Workbook
+    Set wb = ActiveWorkbook
+    If wb Is Nothing Then Exit Sub
+    If Len(wb.Path) = 0 Then
+        MsgBox "当前底稿尚未保存，无法确定「" & ATTACH_FOLDER_NAME & "」文件夹位置。" & vbCrLf & _
+               "请先保存底稿（Ctrl+S）后再插入文件夹引用。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+    If TypeName(Selection) <> "Range" Then
+        MsgBox "请先选中要放置文件夹链接的单元格。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+    If InStr(1, wb.Path, "://", vbTextCompare) > 0 Then
+        MsgBox "底稿保存在网页路径（SharePoint/OneDrive 网页版），相对路径附件链接不可用。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim attachDir As String
+    attachDir = EnsureAttachDirPrompted(fso, wb)
+    If Len(attachDir) = 0 Then Exit Sub
+
+    Dim fd As FileDialog
+    Set fd = Application.FileDialog(msoFileDialogFolderPicker)
+    With fd
+        .Title = "选择要引用的文件夹（将整体复制到底稿附件夹）"
+        If Len(lastSourceDir) > 0 Then
+            .InitialFileName = lastSourceDir & "\"
+        Else
+            .InitialFileName = wb.Path & "\"
+        End If
+        If .Show <> -1 Then Exit Sub
+    End With
+    Dim srcDir As String
+    srcDir = fd.SelectedItems(1)
+    ' 规范化（oracle #5 补）：GetFolder().Path 保留磁盘根、去除非根尾部反斜杠；
+    ' 不要预先裁剪尾部 \（"C:\" 裁成 "C:" 会被解析为盘当前目录，绕过根目录防护）
+    srcDir = fso.GetFolder(srcDir).Path
+    lastSourceDir = fso.GetParentFolderName(srcDir)
+
+    ' 路径防护（oracle #4/#5）：根目录防护前置（先于 fName/destDir 计算与覆盖确认弹窗）
+    If Len(fso.GetParentFolderName(srcDir)) = 0 Then
+        MsgBox "不能引用磁盘根目录。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+
+    Dim fName As String, destDir As String
+    fName = fso.GetFileName(srcDir)
+    destDir = attachDir & "\" & fName
+    If fso.FolderExists(destDir) Then
+        If MsgBox("附件夹内已存在同名文件夹：" & fName & vbCrLf & vbCrLf & _
+                  "「是」合并覆盖（同名文件以新复制的为准）　　「否」取消", _
+                  vbYesNo + vbExclamation, "AttachLink") <> vbYes Then Exit Sub
+    End If
+
+    If IsSubPathOf(attachDir & "\" & fName, srcDir) Or StrComp(attachDir & "\" & fName, srcDir, vbTextCompare) = 0 Then
+        MsgBox "目标位置不能位于源文件夹内部（或与源相同）。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+    If IsSubPathOf(srcDir, attachDir) Then
+        MsgBox "源文件夹已位于本底稿附件夹内，无需引用（可直接建立链接或检查断链）。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+
+    ' 确认覆盖弹窗在 Core 之前；Core 失败（返回串以「失败：」开头）则不插入链接（oracle #3）
+    Dim summary As String
+    summary = AttachLink_InsertFolderCore(srcDir)
+    If Left$(summary, 3) = "失败：" Then
+        MsgBox summary, vbCritical, "AttachLink 插入文件夹引用"
+        Exit Sub
+    End If
+    MsgBox summary, vbInformation, "AttachLink 插入文件夹引用"
+
+    ' 链接插入当前选区的第一个可用格（沿用插入的扩展约定：一格一链接）
+    Dim cellList As Collection
+    Set cellList = FlattenSelection(Selection)
+    If cellList.Count = 0 Then
+        MsgBox "选区内没有可放置链接的单元格。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+    InsertLink cellList(1), ATTACH_FOLDER_NAME & "\" & fName, fName
+    Exit Sub
+Fail:
+    Application.ScreenUpdating = True
+    MsgBox "插入文件夹引用时出错：" & Err.Description, vbCritical, "AttachLink"
+End Sub
+
+' 文件夹引用核心（独立公开函数：便于自动化测试）。以当前活动工作簿所在
+' 目录为基准，复制源文件夹到附件夹（合并覆盖）并把夹内全部文件登记入
+' 内容基线（仅登记缺失键，不改既有版本）。返回汇总文本。
+Public Function AttachLink_InsertFolderCore(ByVal srcDir As String) As String
+    Dim wbHost As Workbook
+    Set wbHost = ActiveWorkbook
+    If wbHost Is Nothing Then
+        AttachLink_InsertFolderCore = "失败：没有活动工作簿。"
+        Exit Function
+    End If
+    If Len(wbHost.Path) = 0 Then
+        AttachLink_InsertFolderCore = "失败：活动工作簿尚未保存。"
+        Exit Function
+    End If
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(srcDir) Then
+        AttachLink_InsertFolderCore = "失败：源文件夹不存在：" & srcDir
+        Exit Function
+    End If
+    srcDir = fso.GetFolder(srcDir).Path                ' oracle #5：Core 直调同样规范化（含大小写归一）
+
+    Dim attachDir As String, fName As String, destDir As String
+    attachDir = wbHost.Path & "\" & ATTACH_FOLDER_NAME
+    fName = fso.GetFileName(srcDir)
+    destDir = attachDir & "\" & fName
+    ' 路径防护（oracle #4，Core 直调同样校验）
+    If Len(fso.GetParentFolderName(srcDir)) = 0 Then
+        AttachLink_InsertFolderCore = "失败：不能引用磁盘根目录。"
+        Exit Function
+    End If
+    If IsSubPathOf(destDir, srcDir) Or StrComp(destDir, srcDir, vbTextCompare) = 0 Then
+        AttachLink_InsertFolderCore = "失败：目标位置不能位于源文件夹内部（或与源相同）。"
+        Exit Function
+    End If
+    If IsSubPathOf(srcDir, attachDir) Then
+        AttachLink_InsertFolderCore = "失败：源文件夹已位于本底稿附件夹内，无需引用。"
+        Exit Function
+    End If
+    If Not EnsureFolder(fso, attachDir) Then
+        AttachLink_InsertFolderCore = "失败：无法创建附件文件夹：" & attachDir
+        Exit Function
+    End If
+    If Not EnsureFolder(fso, destDir) Then
+        AttachLink_InsertFolderCore = "失败：无法创建目标文件夹：" & destDir
+        Exit Function
+    End If
+    On Error GoTo Fail
+    fso.CopyFolder srcDir, destDir, True
+
+    ' 夹内全部文件登记基线（仅补缺失键；已有键的版本与哈希不动）。
+    ' 登记失败（哈希/遍历错误）时如实报告部分完成（oracle #2）
+    Dim base As Object
+    Set base = LoadBaseline(fso, attachDir)
+    Dim regCnt As Long, fileCnt As Long, failCnt As Long
+    RegisterFolderFilesBaseline fso, base, destDir, attachDir, regCnt, fileCnt, failCnt
+    If Not SaveBaseline(fso, attachDir, base) Then
+        AttachLink_InsertFolderCore = "失败：基线文件写入不成功（文件夹已复制，但登记未持久化，体检将重新登记） - " & attachDir & "\" & BASELINE_FILE
+        Exit Function
+    End If
+
+    Dim tail As String
+    If failCnt > 0 Then tail = vbCrLf & "⚠ 有 " & failCnt & " 个文件登记失败（不可读/被占用），体检将显示「校验不可用」"
+    AttachLink_InsertFolderCore = "文件夹引用完成：" & vbCrLf & _
+        "· 已复制到 " & destDir & "（共 " & fileCnt & " 个文件）" & vbCrLf & _
+        "· 新登记内容基线 " & regCnt & " 个文件（夹内篡改可被体检检测）" & tail & vbCrLf & _
+        "· 链接指向附件夹内副本，点击即在资源管理器打开"
+    Exit Function
+Fail:
+    AttachLink_InsertFolderCore = "失败：插入文件夹引用未完成 - " & Err.Description
+End Function
+
+' 递归登记文件夹内全部文件到基线（仅缺失键）；同时统计文件总数与失败数（哈希/遍历错误）
+Private Sub RegisterFolderFilesBaseline(ByVal fso As Object, ByVal base As Object, _
+                                        ByVal folderPath As String, ByVal attachDir As String, _
+                                        ByRef regCnt As Long, ByRef fileCnt As Long, ByRef failCnt As Long)
+    Dim f As Object, sf As Object, key As String, h As String
+    On Error Resume Next
+    For Each f In fso.GetFolder(folderPath).Files
+        fileCnt = fileCnt + 1
+        key = LCase$(Mid$(f.Path, Len(attachDir) + 2))
+        If Not base.Exists(key) Then
+            h = Sha256File(f.Path)
+            If Len(h) > 0 Then
+                base.Add key, h & "|1|" & Format$(Now, "yyyy-mm-dd hh:nn") & "|" & Format$(Now, "yyyy-mm-dd hh:nn")
+                regCnt = regCnt + 1
+            Else
+                failCnt = failCnt + 1
+            End If
+        End If
+    Next f
+    If Err.Number <> 0 Then failCnt = failCnt + 1: Err.Clear
+    For Each sf In fso.GetFolder(folderPath).SubFolders
+        RegisterFolderFilesBaseline fso, base, sf.Path, attachDir, regCnt, fileCnt, failCnt
+    Next sf
+    If Err.Number <> 0 Then failCnt = failCnt + 1: Err.Clear
+End Sub
+
+' 子路径边界判断（大小写不敏感）：child 等于 parent 或位于 parent 之内
+Private Function IsSubPathOf(ByVal child As String, ByVal parent As String) As Boolean
+    Dim c As String, p As String
+    c = LCase$(child)
+    p = LCase$(parent)
+    If Right$(p, 1) = "\" Then p = Left$(p, Len(p) - 1)
+    IsSubPathOf = (c = p) Or (Len(c) > Len(p) And Left$(c, Len(p) + 1) = p & "\")
+End Function
+
+'============================ 1c. 重命名链接显示名 ====================
+' 只改超链接的显示文本（应对收到的文件命名不规范/不清晰），不改动
+' 底层文件名与链接地址——体检、哈希基线、归档迁移均不受影响。
+Public Sub AttachLink_RenameLink()
+    On Error GoTo Fail
+    If TypeName(Selection) <> "Range" Then
+        MsgBox "请先选中要重命名的附件链接单元格。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    Dim c As Range, hl As Hyperlink, target As Hyperlink
+    Set target = Nothing
+    For Each c In Selection.Cells
+        For Each hl In c.Hyperlinks
+            If IsAttachmentLink(hl, fso) Then Set target = hl: Exit For
+        Next hl
+        If Not target Is Nothing Then Exit For
+    Next c
+    If target Is Nothing Then
+        MsgBox "选区内未发现附件链接。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+
+    Dim newName As String
+    newName = InputBox("请输入新的显示名（仅改变链接显示文本，不改动文件本身）：", _
+                       "AttachLink 重命名链接显示名", target.TextToDisplay)
+    newName = Trim$(newName)
+    If Len(newName) = 0 Then Exit Sub
+    target.TextToDisplay = newName
+    Exit Sub
+Fail:
+    MsgBox "重命名时出错：" & Err.Description, vbCritical, "AttachLink"
 End Sub
 
 '============================ 6. 归档迁移（批量）======================
@@ -818,7 +1121,14 @@ Public Sub AttachLink_UpdateVersion()
         Exit Sub
     End If
     If Not fso.FileExists(fullPath) Then
-        MsgBox "附件文件不存在（断链）：请先用「附件断链修复」恢复后再更新版本。", vbExclamation, "AttachLink"
+        If fso.FolderExists(fullPath) Then
+            MsgBox "「附件版本更新」暂不支持文件夹引用。" & vbCrLf & _
+                   "如需更换文件夹内容：清除该链接后删除附件夹内的旧文件夹，重新「插入文件夹引用」，" & vbCrLf & _
+                   "并删除附件夹内 " & BASELINE_FILE & " 后重新生成清单重建基线（注意：仅重插不重建基线，" & vbCrLf & _
+                   "内容差异仍会显示「■ 内容变更」）。", vbInformation, "AttachLink"
+        Else
+            MsgBox "附件文件不存在（断链）：请先用「附件断链修复」恢复后再更新版本。", vbExclamation, "AttachLink"
+        End If
         Exit Sub
     End If
 
@@ -991,10 +1301,11 @@ Done:
     Set LoadBaseline = d
 End Function
 
-' 基线落盘（UTF-8 覆盖写；失败静默——基线缺失只影响内容校验，不影响清单本身）
-Private Sub SaveBaseline(ByVal fso As Object, ByVal attachDir As String, ByVal d As Object)
+' 基线落盘（UTF-8 覆盖写）。返回 True=成功；False=失败（调用方不得报告登记完成——
+' oracle #3：静默吞错会让未持久化登记被当作已完成）
+Private Function SaveBaseline(ByVal fso As Object, ByVal attachDir As String, ByVal d As Object) As Boolean
     On Error GoTo Fail
-    If Not EnsureFolder(fso, attachDir) Then Exit Sub
+    If Not EnsureFolder(fso, attachDir) Then Exit Function
     Dim stm As Object, k As Variant
     Set stm = CreateObject("ADODB.Stream")
     With stm
@@ -1007,11 +1318,68 @@ Private Sub SaveBaseline(ByVal fso As Object, ByVal attachDir As String, ByVal d
     Next k
     stm.SaveToFile attachDir & "\" & BASELINE_FILE, 2             ' adSaveCreateOverWrite
     stm.Close
-    Exit Sub
+    SaveBaseline = True
+    Exit Function
 Fail:
-End Sub
+End Function
 
 '============================ 内部辅助 ================================
+' 递归体检文件夹内全部文件的基线：缺失键登记 v1（dirty 置位）；哈希不一致计入 badCnt；
+' 哈希失败或目录遍历失败计入 failCnt（调用方显示「校验不可用」，不得显示「一致」）
+Private Sub CheckFolderBaseline(ByVal fso As Object, ByVal base As Object, _
+                                ByVal folderPath As String, ByVal attachDir As String, _
+                                ByRef regCnt As Long, ByRef fileCnt As Long, ByRef badCnt As Long, _
+                                ByRef failCnt As Long, ByRef dirty As Boolean)
+    Dim f As Object, sf As Object, key As String, h As String, cur As String
+    On Error Resume Next
+    For Each f In fso.GetFolder(folderPath).Files
+        fileCnt = fileCnt + 1
+        key = LCase$(Mid$(f.Path, Len(attachDir) + 2))
+        h = Sha256File(f.Path)
+        If Len(h) = 0 Then
+            failCnt = failCnt + 1
+        ElseIf Not base.Exists(key) Then
+            base.Add key, h & "|1|" & Format$(Now, "yyyy-mm-dd hh:nn") & "|" & Format$(Now, "yyyy-mm-dd hh:nn")
+            regCnt = regCnt + 1
+            dirty = True
+        Else
+            cur = Split(base(key), "|")(0)
+            If StrComp(cur, h, vbTextCompare) <> 0 Then badCnt = badCnt + 1
+        End If
+    Next f
+    If Err.Number <> 0 Then failCnt = failCnt + 1: Err.Clear
+    For Each sf In fso.GetFolder(folderPath).SubFolders
+        CheckFolderBaseline fso, base, sf.Path, attachDir, regCnt, fileCnt, badCnt, failCnt, dirty
+    Next sf
+    If Err.Number <> 0 Then failCnt = failCnt + 1: Err.Clear
+End Sub
+
+' 前置检查（插入文件/文件夹共用）：附件文件夹不存在则自动创建；已存在则
+' 提示核对（NOTICE_ONCE_PER_FOLDER 语义）。返回附件夹路径；用户取消或
+' 创建失败返回 ""。
+Private Function EnsureAttachDirPrompted(ByVal fso As Object, ByVal wb As Workbook) As String
+    Dim attachDir As String
+    attachDir = wb.Path & "\" & ATTACH_FOLDER_NAME
+    If fso.FolderExists(attachDir) Then
+        If (Not NOTICE_ONCE_PER_FOLDER) Or StrComp(lastNotifiedAttachDir, attachDir, vbTextCompare) <> 0 Then
+            If MsgBox("当前底稿同级已存在「" & ATTACH_FOLDER_NAME & "」文件夹：" & vbCrLf & _
+                      attachDir & vbCrLf & vbCrLf & _
+                      "本次插入的附件将归档复制到该文件夹，请先核对是否为目标目录。" & vbCrLf & vbCrLf & _
+                      "「确定」继续选择　　「取消」退出本次插入", _
+                      vbOKCancel + vbExclamation, "AttachLink") <> vbOK Then Exit Function
+            lastNotifiedAttachDir = attachDir
+        End If
+    Else
+        If Not EnsureFolder(fso, attachDir) Then
+            MsgBox "无法创建附件文件夹：" & attachDir, vbCritical, "AttachLink"
+            Exit Function
+        End If
+        lastNotifiedAttachDir = attachDir
+        MsgBox "当前底稿同级不存在「" & ATTACH_FOLDER_NAME & "」文件夹，已自动创建：" & vbCrLf & attachDir, _
+               vbInformation, "AttachLink"
+    End If
+    EnsureAttachDirPrompted = attachDir
+End Function
 Private Function EnsureFolder(ByVal fso As Object, ByVal p As String) As Boolean
     On Error Resume Next
     If Not fso.FolderExists(p) Then fso.CreateFolder p
