@@ -6,10 +6,10 @@ AttachLink 安装器（GUI 外壳）
 - 静默参数（供自动化验证/高级用户）：
     AttachLinkSetup.exe /install             标准安装（用户级）
     AttachLinkSetup.exe /deploy-elevated     鼨信诺管理员环境部署（弹 UAC）
-    AttachLinkSetup.exe /uninstall           卸载用户级
-    AttachLinkSetup.exe /uninstall-elevated  卸载机器级（弹 UAC）
+    AttachLinkSetup.exe /uninstall           一键卸载（用户级 + 机器级看门狗；检测到机器级时弹一次 UAC）
+    AttachLinkSetup.exe /uninstall-elevated  仅卸载机器级（弹 UAC，兼容保留）
     AttachLinkSetup.exe /selfcheck           自检（校验内嵌文件完整性）
-  退出码：0 成功；2 Excel 在运行；3 安装包不完整；1 其他失败。
+  退出码：0 成功；2 Excel 在运行；3 安装包不完整；8 卸载未完全成功（机器级残留或 UAC 取消）；9 加载项列表清理未完全成功；1 其他失败。
 """
 import os
 import sys
@@ -142,8 +142,7 @@ class App:
         for key, text, cmd in [
             ("install", "标准安装（接收 / 归档同事）", self.act_install),
             ("elev", "鼎信诺管理员环境部署", self.act_elevated),
-            ("uninst", "卸载（用户级）", self.act_uninstall),
-            ("unelev", "卸载（机器级）", self.act_uninstall_elevated),
+            ("uninst", "一键卸载（用户级 + 鼎信诺看门狗）", self.act_uninstall),
         ]:
             b = ttk.Button(bar, text=text, command=cmd)
             b.pack(side="left", padx=(0, 8))
@@ -186,15 +185,12 @@ class App:
         self._start(lambda: Runner(self.outq).run(ps("scripts\\setup.ps1", ["-NonInteractive"]), payload_dir()))
 
     def act_uninstall(self) -> None:
+        # 一键卸载：setup.ps1 -Uninstall 自动检测机器级看门狗并弹 UAC 一并移除
         self._start(lambda: Runner(self.outq).run(ps("scripts\\setup.ps1", ["-Uninstall", "-NonInteractive"]), payload_dir()))
 
     def act_elevated(self) -> None:
         self._start(lambda: Runner(self.outq).run_elevated(
             os.path.join(payload_dir(), "run-elevated.ps1"), "build\\install-elevated.ps1"))
-
-    def act_uninstall_elevated(self) -> None:
-        self._start(lambda: Runner(self.outq).run_elevated(
-            os.path.join(payload_dir(), "run-elevated.ps1"), "build\\install-elevated.ps1 -Uninstall"))
 
     def _drain_queue(self) -> None:
         try:
@@ -219,7 +215,8 @@ class App:
                             parent=self.root,
                         )
                     else:
-                        hint = {2: "请先关闭所有 Excel（含鼎信诺）后重试", 3: "安装包不完整，请联系分发人"}.get(code, "")
+                        hint = {2: "请先关闭所有 Excel（含鼎信诺）后重试", 3: "安装包不完整，请联系分发人",
+                                8: "卸载未完全成功（机器级看门狗残留或 UAC 被取消），详见日志"}.get(code, "")
                         where = ("日志已保存到安装器所在文件夹：\n" + beside if beside
                                  else "日志文件（%TEMP%）：\n" + log_file_path())
                         self.status.configure(text="✗ 操作失败（退出码 %d）——日志已另存到安装目录" % code, foreground="#c62828")

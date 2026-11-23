@@ -87,14 +87,96 @@ if (-not $Uninstall) {
 }
 else {
     Write-Host ''
-    Write-Host '>> 正在卸载 AttachLink 加载项（用户级）...'
+    Write-Host '>> 正在一键卸载 AttachLink（用户级 + 机器级看门狗）...'
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $buildDir 'install.ps1') -Uninstall
-    if ($LASTEXITCODE -ne 0) { throw '卸载失败，请把上方错误信息反馈给分发人。' }
+    $userExit = $LASTEXITCODE
+    $userLevelOpenFail = $false
+    if ($userExit -eq 9) {
+        # oracle 三轮：子脚本「加载项列表清理未完全成功」需原样传播（GUI 退出码承诺 9），不得被 throw 吞成 1
+        $userLevelOpenFail = $true
+        Write-Host '注意：用户级卸载的加载项列表 OPEN 清理未完全成功（见上方警告），继续机器级检查。'
+    }
+    elseif ($userExit -ne 0) { throw '用户级卸载失败，请把上方错误信息反馈给分发人。' }
     Write-Host ''
-    Write-Host '卸载完成（用户级：日常 Excel 中的右键菜单/快捷键已移除）。'
-    Write-Host '注意：本卸载不含机器级看门狗。若本机曾以管理员运行过'
-    Write-Host '      build\install-elevated.ps1（鼎信诺场景），请另行在管理员'
-    Write-Host '      PowerShell 运行：powershell -ExecutionPolicy Bypass -File'
-    Write-Host '      build\install-elevated.ps1 -Uninstall'
+    Write-Host '用户级已卸载（日常 Excel 的加载项/受信任位置/副本已移除）。'
+
+    # ---- 机器级看门狗：检测并一并卸载（一键整合，2026-11-23）----
+    # 旧版只打印手动提示，留给用户跑第二步。鼎信诺场景的同事只跑了用户级
+    # 卸载时，看门狗继续把 Program Files 旧副本注入每个新 Excel 会话并重建
+    # 右键菜单——「卸载后菜单仍在」的同事反馈即此（另有运行中会话内菜单
+    # 保留到关闭的成分）。此处自动检测足迹，未提权则弹一次 UAC 完成卸载。
+    $machineDir = 'C:\Program Files\AttachLink'
+    $taskName   = 'AttachLink Watchdog'
+    $tlHklm = $null
+    foreach ($v in @('16.0', '15.0', '14.0')) {
+        $k = "HKLM:\SOFTWARE\Microsoft\Office\$v\Excel\Security\Trusted Locations\AttachLink"
+        if (Test-Path $k) { $tlHklm = $k; break }
+    }
+    $hasTask = [bool](Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
+    $hasDir  = Test-Path $machineDir
+    $machineFailed = $false
+    if (-not ($hasTask -or $hasDir -or $tlHklm)) {
+        Write-Host '未检测到机器级看门狗部署——本机无需第二步，卸载完成。'
+    }
+    else {
+        $machineFailed = $false
+        $elevatedScript = Join-Path $buildDir 'install-elevated.ps1'
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if ($isAdmin) {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $elevatedScript -Uninstall
+            if ($LASTEXITCODE -ne 0) { Write-Host "机器级卸载退出码 $LASTEXITCODE，以下按实际状态核验。"; $machineFailed = $true }
+        }
+        else {
+            Write-Host '检测到机器级看门狗部署（计划任务/Program Files/HKLM 信任位置），'
+            Write-Host '即将弹出授权（UAC）以一并卸载，请在弹窗中点「是」...'
+            try {
+                # 单一参数行 + -File（提权传参坑：多元素拼接对含特殊字符命令静默失效）
+                $p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden `
+                    -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -Uninstall' -f $elevatedScript)
+                if ($p.ExitCode -ne 0) { Write-Host "提权卸载进程退出码 $($p.ExitCode)，以下按实际状态核验。"; $machineFailed = $true }
+            } catch {
+                Write-Host 'UAC 被取消或启动失败：机器级看门狗未卸载。'
+                $machineFailed = $true
+            }
+        }
+        # 事实核验（不依赖提权窗口输出，直接查残留）
+        $leftTask = [bool](Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
+        $leftDir  = Test-Path $machineDir
+        $leftTl   = $null
+        foreach ($v in @('16.0', '15.0', '14.0')) {
+            $k = "HKLM:\SOFTWARE\Microsoft\Office\$v\Excel\Security\Trusted Locations\AttachLink"
+            if (Test-Path $k) { $leftTl = $k; break }
+        }
+        if ($leftTask -or $leftDir -or $leftTl) { $machineFailed = $true }
+        if (-not $machineFailed) {
+            Write-Host '机器级看门狗已卸载（计划任务/部署目录/HKLM 信任位置均已清除）。'
+        }
+        else {
+            Write-Host '⚠ 机器级未完全卸载，请把以下清单反馈给分发人，或在管理员 PowerShell 手动执行：'
+            Write-Host '  powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1 -Uninstall'
+            if ($leftTask) { Write-Host "  - 计划任务仍存在：$taskName" }
+            if ($leftDir)  { Write-Host "  - 部署目录仍存在：$machineDir" }
+            if ($leftTl)   { Write-Host "  - HKLM 信任位置仍存在：$leftTl" }
+        }
+    }
+
+    # 正在运行的 Excel 会话内，菜单会保留到该会话关闭（#21 单实例驻留同族）
+    $liveXl = Get-Process -Name EXCEL -ErrorAction SilentlyContinue | Where-Object { $_.WorkingSet64 -gt 1MB }
+    Write-Host ''
+    if ($machineFailed) {
+        Write-Host '结果：卸载未完全成功（见上方残留清单），已打开会话中的菜单保留到其关闭。'
+        exit 8
+    }
+    if ($userLevelOpenFail) {
+        Write-Host '结果：机器级已卸载，但用户级加载项列表 OPEN 清理未完全成功（见上方警告）。'
+        exit 9
+    }
+    if ($liveXl) {
+        Write-Host '注意：检测到 Excel 正在运行——已打开会话中的右键菜单会保留到其关闭，'
+        Write-Host '      完全退出所有 Excel 后重新打开即不再出现。'
+    } else {
+        Write-Host '卸载完成。重新打开 Excel 后右键菜单不再出现。'
+    }
+    exit 0
 }
 Write-Host ''

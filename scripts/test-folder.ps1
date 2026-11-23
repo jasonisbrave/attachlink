@@ -65,19 +65,21 @@ while ($row -le 40) {
 }
 Check ($rowF2 -eq '■ 内容变更')                   '夹内篡改被检测（红字）'
 
-'--- 4) 右键菜单结构（1.3.1 浓缩：4 顶项 + 归档子菜单 4 项） ---'
+'--- 4) 右键菜单结构（1.4.x：AttachLink 5 顶项 + 归档子菜单 5 项；原生菜单项共存，仅做存在性断言） ---'
 $ctrls = @($xl.CommandBars.Item('Cell').Controls)
 $names = $ctrls | ForEach-Object { $_.Caption }
 "    顶层: $($names -join ' | ')"
 Check (@($ctrls | Where-Object { $_.Caption -eq '插入附件链接（可多选）' }).Count -eq 1) '顶项1 插入附件链接'
 Check (@($ctrls | Where-Object { $_.Caption -eq '插入文件夹引用' }).Count -eq 1)       '顶项2 插入文件夹引用'
 Check (@($ctrls | Where-Object { $_.Caption -eq '重命名链接显示名' }).Count -eq 1)     '顶项3 重命名链接显示名'
+Check (@($ctrls | Where-Object { $_.Caption -eq '插入底稿引用' }).Count -eq 1)        '顶项4 插入底稿引用'
 $popGuidang = @($ctrls | Where-Object { $_.Caption -eq '归档' })[0]
-Check ($popGuidang.Type -eq 10 -and $popGuidang.Controls.Count -eq 4)          '子菜单「归档」=4 项'
+Check ($popGuidang.Type -eq 10 -and $popGuidang.Controls.Count -eq 5)          '子菜单「归档」=5 项'
 Check (@($popGuidang.Controls | Where-Object { $_.Caption -eq '归档迁移（批量）' }).Count -eq 1) '  含 归档迁移'
 Check (@($popGuidang.Controls | Where-Object { $_.Caption -eq '附件清单 / 体检' }).Count -eq 1) '  含 体检'
 Check (@($popGuidang.Controls | Where-Object { $_.Caption -eq '附件断链修复' }).Count -eq 1)   '  含 断链修复'
 Check (@($popGuidang.Controls | Where-Object { $_.Caption -eq '附件版本更新' }).Count -eq 1)    '  含 版本更新'
+Check (@($popGuidang.Controls | Where-Object { $_.Caption -eq '附件删除（删链接+文件）' }).Count -eq 1) '  含 附件删除'
 Check (@($ctrls | Where-Object { $_.Caption -eq '附件清单' }).Count -eq 0)     '旧「附件清单」父项已并入归档'
 
 '--- 5) oracle 复核回归：G 列串行 / 路径防护 ---'

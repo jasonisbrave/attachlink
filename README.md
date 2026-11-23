@@ -1,4 +1,4 @@
-﻿# AttachLink —— 审计底稿附件链接加载项
+# AttachLink —— 审计底稿附件链接加载项
 
 [![Release v1.3.0](https://img.shields.io/badge/Release-v1.3.0-217346)](https://github.com/jasonisbrave/attachlink/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-217346)](https://github.com/jasonisbrave/attachlink/blob/main/LICENSE)
@@ -75,12 +75,23 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
      - 只改超链接显示文本（应对收到的文件命名不规范/不清晰），不改动文件本身与链接地址
      - 体检、基线、归档迁移均不受影响
      - **支持多选批量**：选区内全部附件链接按行序逐个弹窗（含进度 i/N），留空/取消即停止，已改保留
+   - **1d. 插入底稿引用**
+     - 在单元格中插入指向同项目其他底稿**指定工作表**的超链接（跨底稿交叉索引）
+     - 目标底稿复制入附件夹（自包含原则），链接指向附件夹内副本；附件夹已有同名副本时，内容一致才静默复用，不一致则弹窗确认（防止误引用旧版或异源的同名底稿）
+     - 打开目标底稿、读取工作表列表时启用三重防护（禁宏 / 禁外部链接刷新 / 禁弹窗）；表名含空格、单引号等特殊字符时，`SubAddress` 按 Excel 规则转义
 2. **附件清单 / 体检**：按底稿 sheet 分组编号（如 `货币资金-01`），自动检查每个附件文件是否存在，断链红字标注并汇总；**内容基线校验（SHA-256）**——首次体检把每个附件的内容哈希登记到 `附件\_attachlink_baseline.csv`（随附件夹整体归档迁移/网盘同步），此后体检比对哈希，附件被替换/篡改/同步端同名静默覆盖时红字「■ 内容变更」持续警示（基线不被自动洗白；确为有意替换时删除该文件重新生成清单即重建基线）
 3. **断链修复**：指定附件文件夹当前位置，按文件名自动重连（适用于归档件搬家后的场景）
 4. **清除链接**：清除选区内的附件链接并恢复单元格字体格式
 5. **保存保护**：保存时自动把被 Excel 改写为绝对路径的附件链接归一化回相对路径
 6. **归档迁移（批量）**：鼎信诺归档是把底稿另存到新目录、附件夹不在其处理范围，归档件链接仍指回账套。在归档目录打开任一底稿后运行：把账套附件文件夹**整体移动**到归档目录同级（不留副本、避免双份存储），并批量改写归档目录下**所有**底稿的链接为相对地址，归档件自包含
 7. **附件版本更新**：附件存在差错需有意替换时，选中该附件链接单元格 → 右键「附件版本更新」→ 选新文件确认。旧文件删除、基线版本 +1 并记录更替时间——体检显示「一致 v2」绿字、清单「更替记录」列显式备注替换动作（审计留痕）。**未经本流程的替换仍红字「■ 内容变更」**，版本更替与篡改由此区分
+8. **附件删除（删链接+文件）**：删除选区内全部附件链接；弹窗按文件 / 文件夹 / 断链分类列明清单，确认后**连带删除附件夹内对应文件 / 文件夹，并清除基线条目**（文件夹连带全部后代键）。链接清除使用 `ClearHyperlinks`，保留单元格边框 / 填充。
+
+> [!WARNING]
+> **破坏性操作，三重约束**：
+> - 仅允许处理当前底稿附件夹内目标；越界则整体拒绝、零删除
+> - **不可撤销**
+> - 四类失败（文件 / 链接 / 清理 / 基线）独立计数、如实汇总；锁定文件、保护工作表等部分失败绝不虚报成功
 
 ## 使用入口
 
@@ -91,10 +102,12 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
 | **插入附件链接（可多选）** | 插入附件链接；也可按 **Ctrl+Shift+A** |
 | **插入文件夹引用** | 插入文件夹引用 |
 | **重命名链接显示名** | 选中链接单元格后运行；支持多选批量 |
+| **插入底稿引用** | 插入指向其他底稿**指定工作表**的引用；目标底稿副本存入附件夹，保持自包含 |
 | **归档** ▸ 附件清单 / 体检 | 生成附件清单并体检；也可按 **Ctrl+Shift+K** |
 | **归档** ▸ 附件断链修复 | 修复附件断链 |
 | **归档** ▸ 归档迁移（批量） | 在**归档目录**（如鼎信诺归档出的「财报底稿」文件夹）中打开任一底稿后运行 |
 | **归档** ▸ 附件版本更新 | 选中要替换的附件链接单元格后运行（有意替换走此流程留痕，勿直接覆盖文件） |
+| **归档** ▸ 附件删除（删链接+文件） | **破坏性操作**：确认后连带删除附件夹内文件 / 文件夹并清除基线；仅限当前附件夹内目标，**不可撤销** |
 | 视图 → 宏 → `AttachLink_ClearSelection` | 清除选区链接（可拖到快速访问工具栏） |
 
 > [!NOTE]
@@ -132,7 +145,7 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup.ps1             # 安装
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall  # 卸载（仅用户级；机器级见方式五）
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall  # 一键卸载（用户级 + 机器级；检测到看门狗时弹一次 UAC，详见下方「一键卸载」）
 ```
 
 纯 PowerShell 实现，无未签名 exe 的 SmartScreen/杀软摩擦。
@@ -154,7 +167,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall  # 卸载�
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build\install.ps1          # 安装
-powershell -ExecutionPolicy Bypass -File build\install.ps1 -Uninstall   # 卸载
+powershell -ExecutionPolicy Bypass -File build\install.ps1 -Uninstall   # 卸载（仅用户级，详见下方「一键卸载」）
 ```
 
 ### 方式四：手动安装（备用）
@@ -171,7 +184,7 @@ powershell -ExecutionPolicy Bypass -File build\install.ps1 -Uninstall   # 卸载
 ```powershell
 # 管理员 PowerShell 中运行一次（无需注销重登，装完立即生效）
 powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1
-# 卸载
+# 单独卸载机器级（兼容保留；通常无需单独运行，详见下方「一键卸载」）
 powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1 -Uninstall
 ```
 
@@ -189,6 +202,23 @@ powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1 -Uninstall
 
 > [!NOTE]
 > 前置条件：先以方式一~三完成普通用户级安装（看门狗只负责鼎信诺场景，日常 Excel 由用户级安装覆盖）。
+
+### 一键卸载（v1.4.2+，推荐）
+
+可通过安装器 exe 的「一键卸载」按钮，或运行以下命令：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall
+```
+
+一键卸载会自动完成以下步骤：
+
+1. 执行用户级卸载（加载项注册 / 受信任位置 / APPDATA 副本）
+2. 检测机器级足迹（计划任务 / Program Files / HKLM 信任位置）
+3. 检测到机器级足迹时，弹**一次** UAC，一并卸载看门狗
+4. 按残留事实核验并如实报告
+
+对于已在运行的 Excel 会话，右键菜单会保留到该会话关闭；重启 Excel 后不再出现。
 
 ---
 
@@ -393,7 +423,7 @@ powershell -ExecutionPolicy Bypass -File build\build.ps1
 | E4 | 中 | build.ps1 只探测 16.0/15.0，与 README「Excel 2010+」不符；兜底硬建 16.0 键 | ✅ 已修复：探测 14.0~16.0；HKLM 判定已装版本；无 Excel 直接报错 |
 | E5 | 中 | 保存归一化每链接新建 FSO、无预过滤，大底稿每次保存卡顿 | ✅ 已修复：IsAttachmentLink 复用调用方 FSO + 附件文件夹名预过滤（4 处调用点已传参） |
 | E6 | 低 | 受信任位置 Date 格式与 Excel 原生不一致 | ✅ 已修复：MM/dd/yyyy |
-| E7 | 低 | 卸载不清理加载项列表 OPEN 残留条目 | ⏳ 待办（已提示手动移除路径） |
+| E7 | 低 | 卸载不清理加载项列表 OPEN 残留条目 | ✅ 已修复：卸载时按路径精确清理 `OPEN` / `OPENn` 中指向 `AttachLink.xlam` 的条目（含 `/A` 禁用形式、库目录相对名与 `*\AttachLink\AttachLink.xlam` 后缀形态），第三方条目保留；删除后**重排剩余序列为连续编号**（OPEN 系列读到缺口即停，断档会连坐其后的第三方加载项）。<br>方案源自 PR #2 复核（YehOlt），实现与序列重排随 v1.4.2 落地 |
 | E8 | 低 | 插入 Fail 分支未防御性恢复 ScreenUpdating | ✅ 已修复 |
 | E9 | 低 | 清除链接无选区大小护栏 | ✅ 已修复：同插入路径 10000 上限 |
 | E10 | 低 | 断链修复同名文件跨子目录按文件名合并重连 | 📌 知悉（概率低，附件清单可核对） |
@@ -412,3 +442,7 @@ powershell -ExecutionPolicy Bypass -File build\build.ps1
 - 重新构建 `dist/AttachLink.xlam`：编译自检通过
 - 重新脚本安装：安装成功；受信任位置写入正确键（`Security\Trusted Locations\AttachLink`，AllowSubFolders=0），历史错误键与遗留子目录已清理
 - AccessVBOM 构建开关正确还原原值
+
+## 致谢
+
+- [YehOlt](https://github.com/YehOlt)：定位并实机复现卸载时的加载项列表 OPEN/OPENn 残留问题（[PR #2](https://github.com/jasonisbrave/attachlink/pull/2)，已知问题 E7）；对应清理与序列重排逻辑随 v1.4.2 落地。

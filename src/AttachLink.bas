@@ -37,6 +37,9 @@ Attribute VB_Name = "AttachLink"
 Option Explicit
 
 '============================ 配置区 =================================
+' 可配置键：ATTACH_FOLDER_NAME / SHOW_EXTENSION / AUTO_EXTEND_CELLS /
+'           NOTICE_ONCE_PER_FOLDER / HOTKEY_INSERT / HOTKEY_INDEX / INDEX_SHEET_NAME
+
 ' 附件文件夹名（位于底稿同级目录，可改名）
 Public Const ATTACH_FOLDER_NAME As String = "附件"
 ' True = 链接显示文本含扩展名；False = 不含扩展名
@@ -50,20 +53,25 @@ Public Const HOTKEY_INSERT As String = "^+a"    ' Ctrl+Shift+A
 Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 ' 附件清单工作表名
 Public Const INDEX_SHEET_NAME As String = "附件清单"
+
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.4.0：附件删除（删链接+删文件+基线清理）/ 底稿引用（跨底稿交叉索引）/
+'       IsAttachmentLink 识别 ..\ 形态 / 批量操作逐文件故障隔离
+'       （导出交付包曾实现后于 2026-11-23 按用户决策下线（代码归档移出，回退任务 T1）；
+'        配置外置 INI 未实施，配置仍为源码常量）
 ' 1.3.1：右键菜单再浓缩（4 顶项：归档子菜单收编体检/断链修复，归档前后步骤统一入口）
 ' 1.3.0：WPS 表格支持（全量晚绑定改造，需宿主启用 VBA 环境）+ 重命名多选批量 + 安装器墓碑进程误报修复
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
-' ⚠ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.3.1"
+' ■ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
+Public Const ATTACHLINK_VERSION As String = "1.4.2"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"
 ' 内容基线文件名（位于附件文件夹内，随附件夹整体迁移/同步；UTF-8，格式：相对子路径|SHA-256）
 Private Const BASELINE_FILE As String = "_attachlink_baseline.csv"
 
-' ⚠ VBA 位置规则：模块级 Declare 必须放在【第一条过程之前】（本声明区）。
+' ■ VBA 位置规则：模块级 Declare 必须放在【第一条过程之前】（本声明区）。
 ' 曾放在模块中段导致全量编译失败——SaveAs(xlam) 触发全项目编译时报
 ' 0x800A03EC 或产物宏不可用，而按需编译的 Run 却正常，极具迷惑性
 ' （见 WORKLOG #15）。新增任何 Declare/模块级变量一律放这里。
@@ -133,9 +141,14 @@ Private Sub RegisterMenu(ByVal adding As Boolean)
         btn.OnAction = "AttachLink_RenameLink"
         btn.Tag = MENU_TAG
 
-        ' 二级菜单：归档（迁移 / 体检 / 修复 / 版本更新——归档前后步骤统一入口，1.3.1 浓缩）
+        Set btn = cb.Controls.Add(1, , , 4, True)
+        btn.Caption = "插入底稿引用"
+        btn.OnAction = "AttachLink_InsertCrossRef"
+        btn.Tag = MENU_TAG
+
+        ' 二级菜单：归档（迁移 / 体检 / 修复 / 版本更新 / 删除——归档前后步骤统一入口，1.3.1 浓缩，1.4.0 加删除）
         Dim pop As Object, subBtn As Object
-        Set pop = cb.Controls.Add(10, , , 4, True)
+        Set pop = cb.Controls.Add(10, , , 5, True)
         pop.Caption = "归档"
         pop.Tag = MENU_TAG
         Set subBtn = pop.Controls.Add(1, , , 1, True)
@@ -154,6 +167,11 @@ Private Sub RegisterMenu(ByVal adding As Boolean)
         subBtn.Caption = "附件版本更新"
         subBtn.OnAction = "AttachLink_UpdateVersion"
         subBtn.Tag = MENU_TAG
+        Set subBtn = pop.Controls.Add(1, , , 5, True)
+        subBtn.Caption = "附件删除（删链接+文件）"
+        subBtn.OnAction = "AttachLink_DeleteAttachment"
+        subBtn.Tag = MENU_TAG
+        ' 导出交付包已下线（2026-11-23 用户决策：功能鸡肋，回退任务清单 T1 待改进）
     End If
 End Sub
 
@@ -208,28 +226,40 @@ Public Sub AttachLink_Insert()
     Dim cellList As Collection
     Set cellList = FlattenSelection(Selection)
 
-    Dim inserted As Long, skipped As Long, idx As Long
+    Dim inserted As Long, skipped As Long, idx As Long, failed As Long
     Dim i As Long
-    Dim destPath As String, targetCell As Object
+    Dim destPath As String, targetCell As Object, failList As String
 
     For i = 1 To fd.SelectedItems.Count
+        ' T4：逐文件故障隔离——单个文件处理失败不中断整批
+        On Error Resume Next
+        Err.Clear
+        destPath = ""
         destPath = ArchiveFile(fso, fd.SelectedItems(i), attachDir)
-        If Len(destPath) = 0 Then
-            skipped = skipped + 1
+        If Err.Number <> 0 Then
+            failed = failed + 1
+            failList = failList & "  " & fso.GetFileName(fd.SelectedItems(i)) & "：" & Err.Description & vbCrLf
+            Err.Clear
+            On Error GoTo Fail
         Else
-            Do While idx >= cellList.Count
-                If Not AUTO_EXTEND_CELLS Then Exit Do
-                If Not ExtendCellList(cellList) Then Exit Do
-            Loop
-            If idx >= cellList.Count Then
+            On Error GoTo Fail
+            If Len(destPath) = 0 Then
                 skipped = skipped + 1
             Else
-                Set targetCell = cellList(idx + 1)
-                InsertLink targetCell, _
-                           ATTACH_FOLDER_NAME & "\" & fso.GetFileName(destPath), _
-                           DisplayName(fso.GetFileName(destPath), fso)
-                idx = idx + 1
-                inserted = inserted + 1
+                Do While idx >= cellList.Count
+                    If Not AUTO_EXTEND_CELLS Then Exit Do
+                    If Not ExtendCellList(cellList) Then Exit Do
+                Loop
+                If idx >= cellList.Count Then
+                    skipped = skipped + 1
+                Else
+                    Set targetCell = cellList(idx + 1)
+                    InsertLink targetCell, _
+                               ATTACH_FOLDER_NAME & "\" & fso.GetFileName(destPath), _
+                               DisplayName(fso.GetFileName(destPath), fso)
+                    idx = idx + 1
+                    inserted = inserted + 1
+                End If
             End If
         End If
     Next i
@@ -237,7 +267,10 @@ Public Sub AttachLink_Insert()
     Dim msg As String
     msg = "已插入 " & inserted & " 个附件链接，文件已归档到同级「" & ATTACH_FOLDER_NAME & "」文件夹。"
     If skipped > 0 Then msg = msg & vbCrLf & "跳过 " & skipped & " 个文件（已取消或可用单元格不足）。"
-    MsgBox msg, vbInformation, "AttachLink"
+    If failed > 0 Then
+        msg = msg & vbCrLf & "失败 " & failed & " 个文件：" & vbCrLf & failList
+    End If
+    MsgBox msg, IIf(failed > 0, vbExclamation, vbInformation), "AttachLink"
     Exit Sub
 Fail:
     Application.ScreenUpdating = True
@@ -246,7 +279,7 @@ End Sub
 
 '======================== 2. 附件清单 / 体检 ==========================
 ' 状态列（E）：正常 / 断链（文件不存在）
-' 内容基线列（F）：一致 / ⚠ 内容变更 / 已登记基线 / 校验不可用
+' 内容基线列（F）：一致 / ■ 内容变更 / 已登记基线 / 校验不可用
 '   内容基线 = 附件夹内 _attachlink_baseline.csv（文件名|SHA-256，UTF-8），
 '   随附件夹一起归档迁移/网盘同步。哈希不一致（附件被替换、篡改或同步端
 '   同名覆盖）持续红字警示且【不自动更新基线】；确为有意替换时，删除该
@@ -311,7 +344,7 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Object) As String
         If StrComp(ws.Name, INDEX_SHEET_NAME, vbTextCompare) <> 0 Then
             cnt = 0
             For Each hl In ws.Hyperlinks
-                If IsAttachmentLink(hl, fso) Then cnt = cnt + 1
+                If IsAttachmentLink(hl, fso, wb.Path) Then cnt = cnt + 1
             Next hl
             If cnt > 0 Then
                 ' 分组标题行
@@ -324,7 +357,7 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Object) As String
                 r = r + 1
                 g = 1
                 For Each hl In ws.Hyperlinks
-                    If IsAttachmentLink(hl, fso) Then
+                    If IsAttachmentLink(hl, fso, wb.Path) Then
                         wsIdx.Cells(r, 1).Value = ws.Name & "-" & Format(g, "00")
                         wsIdx.Cells(r, 2).Value = hl.TextToDisplay
                         wsIdx.Cells(r, 3).Value = hl.Address
@@ -479,7 +512,7 @@ Public Function AttachLink_BuildIndexCore(ByVal wb As Object) As String
         End If
     End If
     If persistFail Then
-        msg = msg & vbCrLf & "⚠ 基线文件写入失败：本次新登记未持久化（" & BASELINE_FILE & "），下次体检将重新登记，请检查附件夹写权限。"
+        msg = msg & vbCrLf & "■ 基线文件写入失败：本次新登记未持久化（" & BASELINE_FILE & "），下次体检将重新登记，请检查附件夹写权限。"
     End If
     AttachLink_BuildIndexCore = msg
 End Function
@@ -511,7 +544,7 @@ Public Sub AttachLink_Repair()
     For Each ws In wb.Worksheets
         If StrComp(ws.Name, INDEX_SHEET_NAME, vbTextCompare) <> 0 Then
             For Each hl In ws.Hyperlinks
-                If IsAttachmentLink(hl, fso) Then
+                If IsAttachmentLink(hl, fso, wb.Path) Then
                     rp = ResolveLinkPath(fso, wb.Path, hl.Address)
                     If Not fso.FileExists(rp) And Not fso.FolderExists(rp) Then broken.Add hl
                 End If
@@ -620,7 +653,7 @@ Public Sub NormalizeAttachmentLinks(ByVal wb As Object)
     Dim ws As Object, hl As Object, parentDir As String
     For Each ws In wb.Worksheets
         For Each hl In ws.Hyperlinks
-            If IsAttachmentLink(hl, fso) Then
+            If IsAttachmentLink(hl, fso, wb.Path) Then
                 If InStr(hl.Address, ":") > 0 Or Left$(hl.Address, 2) = "\\" Then
                     parentDir = fso.GetParentFolderName(hl.Address)
                     If StrComp(parentDir, attachDir, vbTextCompare) = 0 Then
@@ -788,7 +821,7 @@ Public Function AttachLink_InsertFolderCore(ByVal srcDir As String) As String
     End If
 
     Dim tail As String
-    If failCnt > 0 Then tail = vbCrLf & "⚠ 有 " & failCnt & " 个文件登记失败（不可读/被占用），体检将显示「校验不可用」"
+    If failCnt > 0 Then tail = vbCrLf & "■ 有 " & failCnt & " 个文件登记失败（不可读/被占用），体检将显示「校验不可用」"
     AttachLink_InsertFolderCore = "文件夹引用完成：" & vbCrLf & _
         "· 已复制到 " & destDir & "（共 " & fileCnt & " 个文件）" & vbCrLf & _
         "· 新登记内容基线 " & regCnt & " 个文件（夹内篡改可被体检检测）" & tail & vbCrLf & _
@@ -840,6 +873,8 @@ End Function
 ' 留空或取消即停止后续（已改的保留），结束后汇总。
 Public Sub AttachLink_RenameLink()
     On Error GoTo Fail
+    Dim wb As Object
+    Set wb = ActiveWorkbook
     If TypeName(Selection) <> "Range" Then
         MsgBox "请先选中要重命名的附件链接单元格。", vbInformation, "AttachLink"
         Exit Sub
@@ -860,7 +895,7 @@ Public Sub AttachLink_RenameLink()
     End If
     For Each c In scanRange.Cells
         For Each hl In c.Hyperlinks
-            If IsAttachmentLink(hl, fso) Then links.Add hl
+            If IsAttachmentLink(hl, fso, wb.Path) Then links.Add hl
         Next hl
     Next c
     If links.Count = 0 Then
@@ -915,13 +950,14 @@ End Function
 Public Function AttachLink_RenameDiag(ByVal newNamePrefix As String) As String
     Dim out As String
     On Error GoTo Fail
+    Dim wb As Object: Set wb = ActiveWorkbook
     If TypeName(Selection) <> "Range" Then AttachLink_RenameDiag = "sel=" & TypeName(Selection): Exit Function
     Dim fso As Object: Set fso = CreateObject("Scripting.FileSystemObject")
     Dim links As Collection: Set links = New Collection
     Dim c As Object, hl As Object
     For Each c In GetScanRange().Cells
         For Each hl In c.Hyperlinks
-            If IsAttachmentLink(hl, fso) Then links.Add hl
+            If IsAttachmentLink(hl, fso, wb.Path) Then links.Add hl
         Next hl
     Next c
     out = "collected=" & links.Count & ";"
@@ -935,6 +971,516 @@ Public Function AttachLink_RenameDiag(ByVal newNamePrefix As String) As String
 Fail:
     AttachLink_RenameDiag = out & "ERR=" & Err.Number & ":" & Err.Description
 End Function
+
+'============================ 1d. 附件删除 ============================
+' 删除选区内全部附件链接，并弹窗确认后连带删除附件夹内对应的文件/文件夹
+' 与基线条目。与「清除选区链接」（仅删链接不删文件）互为补充。
+Public Sub AttachLink_DeleteAttachment()
+    On Error GoTo Fail
+    Dim wb As Object
+    Set wb = ActiveWorkbook
+    If wb Is Nothing Then Exit Sub
+    If Len(wb.Path) = 0 Then
+        MsgBox "当前底稿尚未保存，无法定位附件文件夹。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+    If TypeName(Selection) <> "Range" Then
+        MsgBox "请先选中要删除的附件链接单元格。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim attachDir As String
+    attachDir = fso.GetAbsolutePathName(wb.Path & "\" & ATTACH_FOLDER_NAME)
+
+    ' 收集字符串引用，避免持有 Hyperlink COM 对象跨越文件删除操作。
+    ' links 与 paths 始终保持相同索引。
+    Dim links As Collection, paths As Collection
+    Set links = New Collection
+    Set paths = New Collection
+    Dim c As Object, hl As Object, scanR As Object, fullPath As String
+    Set scanR = GetScanRange()
+    If Not scanR Is Nothing Then
+        For Each c In scanR.Cells
+            For Each hl In c.Hyperlinks
+                If IsAttachmentLink(hl, fso, wb.Path) Then
+                    fullPath = fso.GetAbsolutePathName(ResolveLinkPath(fso, wb.Path, hl.Address))
+                    ' 删除是破坏性操作：只允许处理当前底稿附件夹内的目标。
+                    ' 同时拒绝附件夹根本身（IsSubPathOf 含等值，需另行排除）。
+                    If Not IsSubPathOf(fullPath, attachDir) Or StrComp(fullPath, attachDir, vbTextCompare) = 0 Then
+                        MsgBox "选区包含指向当前附件文件夹之外的链接，已停止操作：" & vbCrLf & fullPath & vbCrLf & vbCrLf & _
+                               "请先执行归档迁移或断链修复；仅想移除链接时请用「清除选区链接」。", _
+                               vbExclamation, "AttachLink"
+                        Exit Sub
+                    End If
+                    links.Add hl.Range.Address(False, False) & "|" & hl.Range.Worksheet.Name
+                    paths.Add fullPath
+                End If
+            Next hl
+        Next c
+    End If
+    If links.Count = 0 Then
+        MsgBox "选区内未发现附件链接。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+
+    ' 构建确认清单
+    Dim fileList As String, i As Long, p As Variant
+    Dim fileCnt As Long, folderCnt As Long, missCnt As Long
+    For Each p In paths
+        If fso.FileExists(p) Then
+            fileList = fileList & "  [文件] " & fso.GetFileName(p) & vbCrLf
+            fileCnt = fileCnt + 1
+        ElseIf fso.FolderExists(p) Then
+            fileList = fileList & "  [文件夹] " & fso.GetFileName(p) & "\（含全部内容）" & vbCrLf
+            folderCnt = folderCnt + 1
+        Else
+            fileList = fileList & "  [断链] " & fso.GetFileName(p) & "（文件不存在，仅删链接）" & vbCrLf
+            missCnt = missCnt + 1
+        End If
+    Next p
+
+    If MsgBox("附件删除确认（共 " & links.Count & " 个链接）：" & vbCrLf & vbCrLf & _
+              fileList & vbCrLf & _
+              "将执行：" & vbCrLf & _
+              "  · 删除选区内 " & links.Count & " 个附件链接" & vbCrLf & _
+              "  · 删除附件夹内 " & fileCnt & " 个文件、" & folderCnt & " 个文件夹" & vbCrLf & _
+              "  · 清除对应基线条目" & vbCrLf & vbCrLf & _
+              "此操作不可撤销。", vbOKCancel + vbExclamation, "AttachLink 附件删除") <> vbOK Then Exit Sub
+
+    ' 执行交给 Core（无对话框，供自动化测试直调）：先删文件/文件夹，再删链接，最后清基线
+    Dim linksJoined As String, pathsJoined As String
+    For i = 1 To links.Count
+        If i > 1 Then
+            linksJoined = linksJoined & vbLf
+            pathsJoined = pathsJoined & vbLf
+        End If
+        linksJoined = linksJoined & CStr(links(i))
+        pathsJoined = pathsJoined & CStr(paths(i))
+    Next i
+
+    Dim summary As String, msgIcon As Long
+    summary = AttachLink_DeleteAttachmentCore(wb, linksJoined, pathsJoined, fso)
+    If InStr(summary, "部分失败") > 0 Or InStr(summary, "失败：") > 0 Then msgIcon = vbExclamation Else msgIcon = vbInformation
+    MsgBox summary, msgIcon, "AttachLink"
+    Exit Sub
+Fail:
+    MsgBox "附件删除时出错：" & Err.Description, vbCritical, "AttachLink"
+End Sub
+
+' 删除执行核心（无对话框，供自动化测试直调）：删文件/文件夹 → 删链接清样式 → 清基线，
+' 返回汇总文本（含「部分失败」/「失败：」字样时 wrapper 以警示图标显示）。
+' linksJoined / pathsJoined 为按行拼接的 "地址|表名" / 完整路径串（vbLf 分隔，两侧一一对应）。
+' 安全契约（oracle 复核 #1）：不信任调用方传入的路径——附件夹由 wb 自身推导，
+' 全部路径先经一次性预检（附件夹内、非根、无控制字符、数据一致），任一项
+' 不合法即整体拒绝、零删除；首项合法后项越界同样不得删除首项。
+Public Function AttachLink_DeleteAttachmentCore(ByVal wb As Object, ByVal linksJoined As String, _
+    ByVal pathsJoined As String, Optional ByVal fsoIn As Object) As String
+
+    Dim fso As Object
+    If fsoIn Is Nothing Then
+        Set fso = CreateObject("Scripting.FileSystemObject")
+    Else
+        Set fso = fsoIn
+    End If
+
+    If wb Is Nothing Then
+        AttachLink_DeleteAttachmentCore = "失败：未提供工作簿，未执行任何删除。"
+        Exit Function
+    End If
+    If Len(wb.Path) = 0 Then
+        AttachLink_DeleteAttachmentCore = "失败：底稿未保存，无法定位附件文件夹，未执行任何删除。"
+        Exit Function
+    End If
+
+    ' 附件夹从 wb 自推导（不信任调用方），GetAbsolutePathName 规范化防 ../ 与重复分隔符
+    Dim attachDir As String
+    attachDir = fso.GetAbsolutePathName(wb.Path & "\" & ATTACH_FOLDER_NAME)
+
+    Dim linkArr() As String, pathArr() As String
+    linkArr = Split(linksJoined, vbLf)
+    pathArr = Split(pathsJoined, vbLf)
+    If UBound(linkArr) < 0 Or UBound(linkArr) <> UBound(pathArr) Then
+        AttachLink_DeleteAttachmentCore = "失败：删除内部数据不一致，未执行任何删除。"
+        Exit Function
+    End If
+
+    ' ---- 预检：全部通过才开始删除；任一项不合法 → 整体拒绝、零删除 ----
+    Dim i As Long, p As Variant, norm As String
+    For i = 0 To UBound(pathArr)
+        p = pathArr(i)
+        If Len(CStr(p)) = 0 Then
+            AttachLink_DeleteAttachmentCore = "失败：第 " & (i + 1) & " 项路径为空，未执行任何删除。"
+            Exit Function
+        End If
+        ' 拒绝换行/NUL 注入（不用 Asc 逐字符扫描：中文字符的 ANSI 码转换会假阳性）
+        If InStr(CStr(p), vbCr) > 0 Or InStr(CStr(p), vbLf) > 0 Or InStr(CStr(p), Chr$(0)) > 0 Then
+            AttachLink_DeleteAttachmentCore = "失败：第 " & (i + 1) & " 项路径含换行/NUL 字符，未执行任何删除。"
+            Exit Function
+        End If
+        norm = fso.GetAbsolutePathName(CStr(p))
+        If Not IsSubPathOf(norm, attachDir) Or StrComp(norm, attachDir, vbTextCompare) = 0 Then
+            AttachLink_DeleteAttachmentCore = "失败：第 " & (i + 1) & " 项越界（不在当前底稿附件文件夹内或为附件夹根），未执行任何删除：" & vbCrLf & norm
+            Exit Function
+        End If
+        pathArr(i) = norm
+    Next i
+    For i = 0 To UBound(linkArr)
+        If InStr(CStr(linkArr(i)), "|") = 0 Then
+            AttachLink_DeleteAttachmentCore = "失败：第 " & (i + 1) & " 项链接引用格式非法，未执行任何删除。"
+            Exit Function
+        End If
+    Next i
+
+    Dim delCnt As Long, delFail As Long
+    Dim linkDelCnt As Long, linkDelFail As Long
+    Dim cleanFail As Long
+    Dim missCnt As Long
+
+    ' 1) 删除文件/文件夹（missCnt 在此自行统计，不信任调用方预计算）
+    For i = 0 To UBound(pathArr)
+        p = pathArr(i)
+        Err.Clear
+        On Error Resume Next
+        If fso.FileExists(p) Then
+            Err.Clear
+            fso.DeleteFile p, True
+            If Err.Number = 0 Then delCnt = delCnt + 1 Else delFail = delFail + 1: Err.Clear
+        ElseIf fso.FolderExists(p) Then
+            Err.Clear
+            fso.DeleteFolder p, True
+            If Err.Number = 0 Then delCnt = delCnt + 1 Else delFail = delFail + 1: Err.Clear
+        Else
+            ' 断链：目标本就不存在，不算文件删除失败
+            missCnt = missCnt + 1
+        End If
+        Err.Clear
+        On Error GoTo 0
+    Next i
+
+    ' 2) 删链接 + 清内容（保留单元格边框/填充格式；清除超链接字体样式和文本）
+    '    字符串引用 "地址|表名" 在此解析重定位（Split 限 2 段，表名含 | 不受影响）
+    Dim cellRef As Object, wsRef As Object
+    Dim refParts() As String
+    Dim addr As String, sheetName As String
+    Dim remaining As Long, itemErr As Long, cleanErr As Long
+    For i = UBound(linkArr) To 0 Step -1
+        Set cellRef = Nothing: Set wsRef = Nothing
+        Erase refParts
+        addr = "": sheetName = ""
+        remaining = -1: itemErr = 0: cleanErr = 0
+        On Error Resume Next
+        refParts = Split(CStr(linkArr(i)), "|", 2)
+        If UBound(refParts) = 1 Then
+            addr = refParts(0)
+            sheetName = refParts(1)
+            ' 直接按表名取 Worksheet 对象再 Range(addr)，不拼接含表名的字符串，
+            ' 表名中的空格/单引号等特殊字符无需转义
+            Set wsRef = wb.Worksheets(sheetName)
+            If Not wsRef Is Nothing Then Set cellRef = wsRef.Range(addr)
+        End If
+        If cellRef Is Nothing Then
+            linkDelFail = linkDelFail + 1
+        Else
+            ' 删链接：ClearHyperlinks 是唯一「删链接且保留边框/填充」的方法——
+            ' 实测（2026-11-23，Excel 16.0）Range.Hyperlinks.Delete 与单个
+            ' Hyperlink.Delete 均会把单元格边框/填充重置为无格式；ClearHyperlinks 保留。
+            ' 宿主若无此方法（老版本）则回退 Hyperlinks.Delete（牺牲格式保功能）。
+            Err.Clear
+            cellRef.ClearHyperlinks
+            itemErr = Err.Number
+            If itemErr <> 0 Then
+                Err.Clear
+                cellRef.Hyperlinks.Delete
+                itemErr = Err.Number
+            End If
+            ' 无异常不代表链接确实消失，复核集合
+            If itemErr = 0 Then
+                remaining = cellRef.Hyperlinks.Count
+                itemErr = Err.Number
+            End If
+            If itemErr <> 0 Or remaining <> 0 Then
+                linkDelFail = linkDelFail + 1
+            Else
+                linkDelCnt = linkDelCnt + 1
+                ' 用 Value="" 而非 ClearContents（为规避宿主兼容差异沿用 Value=""）；
+                ' 每步单独记录错误，避免后续成功调用掩盖前一步失败
+                Err.Clear
+                cellRef.Value = ""
+                If Err.Number <> 0 Then cleanErr = Err.Number
+                Err.Clear
+                cellRef.Font.Underline = -4142
+                If Err.Number <> 0 And cleanErr = 0 Then cleanErr = Err.Number
+                Err.Clear
+                cellRef.Font.ColorIndex = -4105
+                If Err.Number <> 0 And cleanErr = 0 Then cleanErr = Err.Number
+                Err.Clear
+                cellRef.Font.Bold = False
+                If Err.Number <> 0 Then cleanErr = Err.Number
+                If cleanErr <> 0 Then cleanFail = cleanFail + 1
+            End If
+        End If
+        Err.Clear
+        On Error GoTo 0
+    Next i
+
+    ' 3) 清基线：文件删自身键；文件夹连带删除 "文件夹\..." 全部后代键
+    '    严格加载（oracle 复核 #3）：区分「基线文件不存在」与「读取失败」——
+    '    读取失败必须如实报 baseReadFail，且绝不把部分字典回写（防覆盖丢键）；
+    '    写回失败单独报 baseWriteFail（写回失败不保证文件未改动，措辞区分）
+    Dim base As Object, key As Variant
+    Dim baseStatus As Long
+    Dim baseReadFail As Boolean, baseWriteFail As Boolean
+    Set base = LoadBaselineStrict(fso, attachDir, baseStatus)
+    If baseStatus = 2 Then
+        baseReadFail = True
+    ElseIf base.Count > 0 Then
+        Dim newBase As Object
+        Set newBase = CreateObject("Scripting.Dictionary")
+        Dim found As Boolean, rel As String
+        For Each key In base.Keys
+            found = False
+            For Each p In pathArr
+                rel = LCase$(Mid$(CStr(p), Len(attachDir) + 2))
+                If StrComp(CStr(key), rel, vbTextCompare) = 0 Then
+                    found = True
+                ElseIf StrComp(Left$(CStr(key), Len(rel) + 1), rel & "\", vbTextCompare) = 0 Then
+                    found = True
+                End If
+                If found Then Exit For
+            Next p
+            If Not found Then newBase.Add key, base(key)
+        Next key
+        If Not SaveBaseline(fso, attachDir, newBase) Then baseWriteFail = True
+    End If
+
+    ' 4) 如实汇总：不以链接总数冒充链接成功数
+    Dim msg As String
+    If delFail > 0 Or linkDelFail > 0 Or cleanFail > 0 Or baseReadFail Or baseWriteFail Then
+        msg = "附件删除结束（部分失败）："
+    Else
+        msg = "附件删除完成："
+    End If
+    msg = msg & "已删除 " & delCnt & " 个文件/文件夹、" & linkDelCnt & " 个链接"
+    If delFail > 0 Then msg = msg & "，" & delFail & " 个文件/文件夹删除失败"
+    If linkDelFail > 0 Then msg = msg & "，" & linkDelFail & " 个链接删除失败"
+    If cleanFail > 0 Then msg = msg & "，" & cleanFail & " 个单元格内容/样式清理失败"
+    If baseReadFail Then msg = msg & "，基线读取失败（文件未改动，未执行基线清理，请人工核对）"
+    If baseWriteFail Then msg = msg & "，基线清理结果保存失败（请人工核对）"
+    If missCnt > 0 Then msg = msg & "，" & missCnt & " 个链接目标本就不存在"
+    AttachLink_DeleteAttachmentCore = msg
+End Function
+
+'============================ 1e. 底稿引用 =============================
+' 在单元格中插入指向同项目其他底稿**指定工作表**的超链接。
+' 目标底稿复制入附件夹（自包含原则），链接指向附件夹内副本。
+' 用 Workbooks.Open(ReadOnly) 读取工作表列表供选择（防选错工作表名导致
+' 点击链接时 Excel 卡死）。打开目标时加三重防护：
+'   EnableEvents=False（防目标宏运行）+ UpdateLinks=0（防外部链接刷新）
+'   + DisplayAlerts=False（防弹窗），读完立即关闭并还原。
+Public Sub AttachLink_InsertCrossRef()
+    On Error GoTo Fail
+    Dim wb As Object
+    Set wb = ActiveWorkbook
+    If wb Is Nothing Then Exit Sub
+    If Len(wb.Path) = 0 Then
+        MsgBox "当前底稿尚未保存。请先保存底稿（Ctrl+S）。", vbExclamation, "AttachLink"
+        Exit Sub
+    End If
+    If TypeName(Selection) <> "Range" Then
+        MsgBox "请先选中要放置底稿引用的单元格。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    ' 第一步：选择底稿文件
+    Dim fd As Object
+    Set fd = Application.FileDialog(3)
+    With fd
+        .Title = "第一步：选择要引用的底稿文件"
+        .AllowMultiSelect = False
+        .Filters.Clear
+        .Filters.Add "Excel 底稿", "*.xlsx;*.xls;*.xlsm"
+        If Len(lastSourceDir) > 0 Then
+            .InitialFileName = lastSourceDir & "\"
+        Else
+            .InitialFileName = wb.Path & "\"
+        End If
+        If .Show <> -1 Then Exit Sub
+    End With
+    Dim targetPath As String
+    targetPath = fd.SelectedItems(1)
+    lastSourceDir = fso.GetParentFolderName(targetPath)
+
+    If StrComp(targetPath, wb.FullName, vbTextCompare) = 0 Then
+        MsgBox "不能引用当前底稿自身。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+
+    ' 第二步：安全打开目标底稿读取工作表列表（四重防护防卡死/防宏）
+    ' oracle 二轮：EnableEvents=False 不等于禁宏——宏经 AutomationSecurity 才真正
+    ' 关闭（msoAutomationSecurityForceDisable=3）；Fail 路径必须 stateCaptured 门控，
+    ' 防止「捕获前出错」把未初始化的 prev* 默认 False 写回全局（关闭事件/提示/刷屏）
+    Dim targetWb As Object, sheetList As String, i As Long
+    Dim prevEvents As Boolean, prevAlerts As Boolean, prevScreen As Boolean
+    Dim stateCaptured As Boolean, failDesc As String
+    Dim prevAutoSec As Variant, autoSecSet As Boolean
+    stateCaptured = False
+    autoSecSet = False
+    prevEvents = Application.EnableEvents
+    prevAlerts = Application.DisplayAlerts
+    prevScreen = Application.ScreenUpdating
+    stateCaptured = True
+    On Error Resume Next
+    Application.EnableEvents = False              ' 防事件连锁
+    Application.DisplayAlerts = False             ' 防弹窗
+    Application.ScreenUpdating = False
+    Err.Clear
+    prevAutoSec = Application.AutomationSecurity  ' 宿主不支持则不设（保持默认）
+    If Err.Number = 0 Then
+        Application.AutomationSecurity = 3        ' 真正禁宏：ForceDisable
+        autoSecSet = (Err.Number = 0)
+    End If
+    Err.Clear                                     ' oracle 三轮：读取失败的旧错误不得泄入下方 Open 判定
+    Set targetWb = Application.Workbooks.Open(targetPath, UpdateLinks:=0, ReadOnly:=True)
+    If Err.Number <> 0 Or targetWb Is Nothing Then
+        Err.Clear
+        If Not targetWb Is Nothing Then targetWb.Close SaveChanges:=False   ' 半开状态兜底（Open 返回对象但带错）
+        Application.EnableEvents = prevEvents
+        Application.DisplayAlerts = prevAlerts
+        Application.ScreenUpdating = prevScreen
+        If autoSecSet Then Application.AutomationSecurity = prevAutoSec
+        stateCaptured = False
+        MsgBox "无法读取目标底稿（文件可能被锁定或格式不支持）。", vbExclamation, "AttachLink"
+        On Error GoTo Fail
+        Exit Sub
+    End If
+    On Error GoTo Fail
+
+    Dim sheetCount As Long
+    sheetCount = targetWb.Worksheets.Count
+    For i = 1 To sheetCount
+        sheetList = sheetList & "  " & i & ". " & targetWb.Worksheets(i).Name & vbCrLf
+    Next i
+
+    Dim pick As String, targetSheet As String
+    If sheetCount = 1 Then
+        targetSheet = targetWb.Worksheets(1).Name
+    Else
+        pick = InputBox("第二步：选择要引用的工作表（输入编号或名称）：" & vbCrLf & vbCrLf & _
+                        sheetList, "AttachLink 底稿引用", "1")
+        pick = Trim$(pick)
+        If Len(pick) = 0 Then GoTo CleanupTarget
+        If IsNumeric(pick) Then
+            Dim idx As Long
+            idx = CLng(pick)
+            If idx < 1 Or idx > sheetCount Then
+                MsgBox "编号超出范围（1-" & sheetCount & "）。", vbExclamation, "AttachLink"
+                GoTo CleanupTarget
+            End If
+            targetSheet = targetWb.Worksheets(idx).Name
+        Else
+            Dim found As Boolean
+            found = False
+            For i = 1 To sheetCount
+                If StrComp(targetWb.Worksheets(i).Name, pick, vbTextCompare) = 0 Then
+                    targetSheet = targetWb.Worksheets(i).Name
+                    found = True
+                    Exit For
+                End If
+            Next i
+            If Not found Then
+                MsgBox "未找到工作表「" & pick & "」。", vbExclamation, "AttachLink"
+                GoTo CleanupTarget
+            End If
+        End If
+    End If
+
+    ' 关闭目标底稿，还原应用状态
+    targetWb.Close SaveChanges:=False
+    Set targetWb = Nothing
+    Application.EnableEvents = prevEvents
+    Application.DisplayAlerts = prevAlerts
+    Application.ScreenUpdating = prevScreen
+    If autoSecSet Then Application.AutomationSecurity = prevAutoSec
+    stateCaptured = False
+
+    ' 第三步：复制目标底稿到附件夹（自包含原则）
+    Dim attachDir As String
+    attachDir = EnsureAttachDirPrompted(fso, wb)
+    If Len(attachDir) = 0 Then Exit Sub
+    Dim destFile As String, dispName As String
+    destFile = attachDir & "\" & fso.GetFileName(targetPath)
+    dispName = fso.GetBaseName(targetPath) & "-" & targetSheet
+    ' 同名不同内容检测（oracle 复核）：附件夹已有同名副本时，内容一致才静默复用；
+    ' 不一致必须提示——防旧版或异源同名底稿被静默引用（自包含原则被破坏）
+    Dim needCopy As Boolean
+    If fso.FileExists(destFile) Then
+        Dim hSrc As String, hDst As String
+        hSrc = Sha256File(targetPath)
+        hDst = Sha256File(destFile)
+        If Len(hSrc) > 0 And Len(hDst) > 0 And StrComp(hSrc, hDst, vbBinaryCompare) = 0 Then
+            needCopy = False
+        Else
+            If MsgBox("附件夹内已存在同名但内容不同的底稿副本：" & vbCrLf & _
+                      fso.GetFileName(destFile) & vbCrLf & vbCrLf & _
+                      "「是」= 用所选底稿覆盖副本（已有指向它的引用将看到新内容）；" & vbCrLf & _
+                      "「否」= 取消本次插入。", vbYesNo + vbExclamation, "AttachLink 底稿引用") <> vbYes Then Exit Sub
+            needCopy = True
+        End If
+    Else
+        needCopy = True
+    End If
+    If needCopy Then fso.CopyFile targetPath, destFile, True
+
+    ' 插入链接：Address=附件夹内相对路径，SubAddress=工作表!A1
+    Dim cellList As Collection
+    Set cellList = FlattenSelection(Selection)
+    If cellList.Count = 0 Then
+        MsgBox "选区内没有可放置链接的单元格。", vbInformation, "AttachLink"
+        Exit Sub
+    End If
+    Dim target As Object, relAddr As String, subAddr As String
+    Set target = cellList(1)
+    If target.Hyperlinks.Count > 0 Then target.Hyperlinks(1).Delete
+    relAddr = ATTACH_FOLDER_NAME & "\" & fso.GetFileName(destFile)
+    ' SubAddress 转义（oracle 复核）：统一单引号包裹（Excel 对简单表名同样合法），
+    ' 表名内的单引号按 Excel 规则双写——空格/引号/括号/数字开头等全部安全
+    subAddr = "'" & Replace(targetSheet, "'", "''") & "'!A1"
+    target.Hyperlinks.Add Anchor:=target, Address:=relAddr, SubAddress:=subAddr, TextToDisplay:=dispName
+
+    MsgBox "底稿引用已插入：" & vbCrLf & _
+           "  显示名：" & dispName & vbCrLf & _
+           "  底稿副本：" & relAddr & vbCrLf & _
+           "  工作表：" & targetSheet & vbCrLf & _
+           "点击链接即打开副本并跳转到该工作表。", vbInformation, "AttachLink"
+    Exit Sub
+CleanupTarget:
+    On Error Resume Next
+    If Not targetWb Is Nothing Then targetWb.Close SaveChanges:=False
+    If stateCaptured Then
+        Application.EnableEvents = prevEvents
+        Application.DisplayAlerts = prevAlerts
+        Application.ScreenUpdating = prevScreen
+    End If
+    If autoSecSet Then Application.AutomationSecurity = prevAutoSec
+    On Error GoTo Fail
+    Exit Sub
+Fail:
+    On Error Resume Next
+    failDesc = Err.Description                    ' 清理动作可能清掉 Err，先存
+    If Not targetWb Is Nothing Then targetWb.Close SaveChanges:=False
+    If stateCaptured Then
+        Application.EnableEvents = prevEvents
+        Application.DisplayAlerts = prevAlerts
+        Application.ScreenUpdating = prevScreen
+    End If
+    If autoSecSet Then Application.AutomationSecurity = prevAutoSec
+    MsgBox "插入底稿引用时出错：" & failDesc, vbCritical, "AttachLink"
+End Sub
 
 '============================ 6. 归档迁移（批量）======================
 ' 场景：鼎信诺「归档」把处理后的底稿另存到新目录（如 桌面\客户名\财报底稿），
@@ -1158,7 +1704,7 @@ Public Sub AttachLink_UpdateVersion()
     If Not scanR Is Nothing Then
         For Each c In scanR.Cells
             For Each hl In c.Hyperlinks
-                If IsAttachmentLink(hl, fso) Then Set target = hl: Exit For
+                If IsAttachmentLink(hl, fso, wb.Path) Then Set target = hl: Exit For
             Next hl
             If Not target Is Nothing Then Exit For
         Next c
@@ -1189,7 +1735,7 @@ Public Sub AttachLink_UpdateVersion()
     End If
 
     ' 基线必须已登记（版本号与历史来自基线）
-    Dim base As Object, key As String, meta() As String
+    Dim base As Object, key As Variant, meta() As String
     Set base = LoadBaseline(fso, attachDir)
     key = LCase$(Mid$(fullPath, Len(attachDir) + 2))
     If Not base.Exists(key) Then
@@ -1553,6 +2099,62 @@ Done:
     Set LoadBaseline = d
 End Function
 
+' 严格版基线加载（删除等破坏性路径专用，oracle 复核 #3）：
+' status 返回 0=正常（可能为空字典）/ 1=基线文件不存在 / 2=读取或解析失败。
+' 与 LoadBaseline 的区别：任何异常（含文件被独占锁定、流读取失败）都如实
+' 上报 status=2，绝不把「读取失败」伪装成「空基线=无需清理」。
+Private Function LoadBaselineStrict(ByVal fso As Object, ByVal attachDir As String, ByRef status As Long) As Object
+    Dim d As Object
+    Set d = CreateObject("Scripting.Dictionary")
+    status = 0
+    Dim p As String
+    p = attachDir & "\" & BASELINE_FILE
+    If Not fso.FileExists(p) Then
+        status = 1
+        Set LoadBaselineStrict = d
+        Exit Function
+    End If
+    On Error GoTo BadRead
+    Dim stm As Object, text As String, lines() As String, i As Long
+    Dim line As String, parts() As String, verS As String, tC As String, tU As String
+    Set stm = CreateObject("ADODB.Stream")
+    With stm
+        .Type = 2
+        .Charset = "UTF-8"
+        .Open
+        .LoadFromFile p
+        .Position = 0
+        text = .ReadText
+        .Close
+    End With
+    lines = Split(text, vbLf)
+    ' 严格逐行校验（oracle 二轮 #3）：任何非空行无法按受支持格式完整解析
+    ' （无分隔符 / 字段数非 v1(2) 或 v2(5) / 空键空哈希空版本 / 归一化重复键）
+    ' 均判读取失败——绝不让部分字典伪装成完整基线回写覆盖
+    Dim keyN As String
+    For i = 0 To UBound(lines)
+        line = Replace(lines(i), vbCr, "")
+        If Len(line) > 0 Then
+            parts = Split(line, "|")
+            If UBound(parts) <> 1 And UBound(parts) <> 4 Then GoTo BadRead
+            verS = "1": tC = "": tU = ""
+            If UBound(parts) = 4 Then
+                verS = parts(2): tC = parts(3): tU = parts(4)
+            End If
+            If Len(parts(0)) = 0 Or Len(parts(1)) = 0 Or Len(verS) = 0 Then GoTo BadRead
+            keyN = LCase$(parts(0))
+            If d.Exists(keyN) Then GoTo BadRead
+            d(keyN) = parts(1) & "|" & verS & "|" & tC & "|" & tU
+        End If
+    Next i
+    Set LoadBaselineStrict = d
+    Exit Function
+BadRead:
+    status = 2
+    Set d = CreateObject("Scripting.Dictionary")
+    Set LoadBaselineStrict = d
+End Function
+
 ' 基线落盘（UTF-8 覆盖写）。返回 True=成功；False=失败（调用方不得报告登记完成——
 ' oracle #3：静默吞错会让未持久化登记被当作已完成）
 Private Function SaveBaseline(ByVal fso As Object, ByVal attachDir As String, ByVal d As Object) As Boolean
@@ -1639,9 +2241,10 @@ Private Function EnsureFolder(ByVal fso As Object, ByVal p As String) As Boolean
 End Function
 
 ' 判断是否为本加载项插入的附件链接：
-' 相对地址以「附件\」开头，或绝对路径的父目录名为附件文件夹
-' fsoIn：可选传入调用方已建的 FSO 实例（保存归一化等高频路径下避免反复 CreateObject）
-Private Function IsAttachmentLink(ByVal hl As Object, Optional ByVal fsoIn As Object) As Boolean
+' 相对地址以「附件\」开头，或绝对路径的父目录名为附件文件夹，
+' 或 ..\ 形态相对地址（鼎信诺归档另存会把链接重基为 ..\账套\...\附件\x，WORKLOG #14）
+' fsoIn / wbPathIn：可选传入调用方已建的 FSO 实例 / 底稿路径（用于解析 ..\ 相对形态）
+Private Function IsAttachmentLink(ByVal hl As Object, Optional ByVal fsoIn As Object, Optional ByVal wbPathIn As String = "") As Boolean
     Dim a As String
     a = hl.Address
     If Len(a) = 0 Then Exit Function
@@ -1659,6 +2262,21 @@ Private Function IsAttachmentLink(ByVal hl As Object, Optional ByVal fsoIn As Ob
         parentDir = fso.GetParentFolderName(a)
         If Len(parentDir) > 0 Then
             If StrComp(fso.GetFileName(parentDir), ATTACH_FOLDER_NAME, vbTextCompare) = 0 Then IsAttachmentLink = True
+        End If
+    ElseIf Left$(a, 2) = ".." And Len(wbPathIn) > 0 Then
+        ' ..\ 相对形态：基于底稿路径解析出完整路径后看父目录名（T12）
+        Dim fso2 As Object, fullPath As String
+        If fsoIn Is Nothing Then
+            Set fso2 = CreateObject("Scripting.FileSystemObject")
+        Else
+            Set fso2 = fsoIn
+        End If
+        fullPath = ResolveLinkPath(fso2, wbPathIn, a)
+        If Len(fullPath) > 0 Then
+            parentDir = fso2.GetParentFolderName(fullPath)
+            If Len(parentDir) > 0 Then
+                If StrComp(fso2.GetFileName(parentDir), ATTACH_FOLDER_NAME, vbTextCompare) = 0 Then IsAttachmentLink = True
+            End If
         End If
     End If
 End Function
@@ -1895,7 +2513,7 @@ Private Function SuggestAttachSource(ByVal wb As Object, ByVal fso As Object) As
     Set dirs = CreateObject("Scripting.Dictionary")
     For Each ws In wb.Worksheets
         For Each hl In ws.Hyperlinks
-            If IsAttachmentLink(hl, fso) Then
+            If IsAttachmentLink(hl, fso, wb.Path) Then
                 If InStr(hl.Address, ":") > 0 Or Left$(hl.Address, 2) = "\\" Then
                     p = LCase$(fso.GetParentFolderName(hl.Address))
                     If Len(p) > 0 Then dirs(p) = dirs(p) + 1
@@ -1927,9 +2545,10 @@ End Function
 
 ' 清除单个单元格上的附件链接；清完无残留链接时恢复字体格式
 Private Function ClearCellLinks(ByVal c As Object) As Long
+    Dim wb As Object: Set wb = ActiveWorkbook
     Dim i As Long, removed As Long
     For i = c.Hyperlinks.Count To 1 Step -1
-        If IsAttachmentLink(c.Hyperlinks(i)) Then
+        If IsAttachmentLink(c.Hyperlinks(i), , wb.Path) Then
             c.Hyperlinks(i).Delete
             removed = removed + 1
         End If
