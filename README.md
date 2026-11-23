@@ -30,6 +30,12 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
   - **文件夹引用与清单体检在 WPS 端耗时明显长于 Excel**（纯 VBA 哈希约为 `certutil` 的 1/10 速度）——属 WPS 宿主限制（已知软件层面问题），耗时可接受则无需处理
   - **鼎信诺基于 Excel COM 自动化，在 WPS 下无法使用**——归档迁移、看门狗等鼎信诺配套功能仅面向 Excel，WPS 无需也不支持（归档流程请在 Excel 端完成）
   - 菜单自愈/保存归一化等宿主事件特性以 Excel 为准
+- **Excel 与 WPS 同时安装的机器（v1.4.3 起）**
+  - **看门狗只附着 `EXCEL.EXE`**，不再向 WPS 表格注入加载项。旧版会让 WPS 卡在「正在打开文档…」或反复弹「名为"AttachLink.xlam"的文档已经打开」
+  - **升级时两级一并更新**：v1.4.2 及更早版本升级时，重新运行安装器点「一键安装」即可（加载项与看门狗一并更新）；只点了「仅安装加载项」的机器，Program Files 里的旧版看门狗仍在运行，安装日志会提示补做部署
+  - **WPS 菜单取决于 VBA 环境**：WPS 表格启动时会沿用 Excel 的加载项注册：有 VBA 环境时 AttachLink 自动加载、出现右键菜单；未装 VBA 环境的 WPS 没有菜单（编制请在 Excel 中完成），归档件点链接查看不受影响
+  - **判断 WPS 是否有 VBA 环境**：看 Windows「应用和功能」里有没有「VBA (xxxx.xx)」项，或在 WPS 表格里按 Alt+F11 看能否打开 VBA 编辑器——**不要**以 WPS 安装目录下有没有 `vbe7.dll` 为准（该文件不在那里）
+  - 升级 / 重装前请同时关闭 WPS 表格（它可能已加载 AttachLink 并占用文件；安装器检测到时会给出对应提示）
 - 不适用于 Mac / 网页版（链接查看不受限：归档件中的普通超链接在任何表格软件中均可点击）
 
 ## 快速开始
@@ -37,13 +43,15 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
 **接收 / 复核归档底稿，或负责归档的同事，按以下三步即可：**
 
 1. 从 [GitHub Releases](https://github.com/jasonisbrave/attachlink/releases) 下载 `AttachLink-<版本>.zip`，建议先在 zip 属性页勾选「解除锁定」再解压。
-2. 双击 **`AttachLinkSetup.exe`**，按窗口按钮选择**标准安装**；exe 未签名，Windows 可能弹「已保护你的电脑」——点「更多信息 → 仍要运行」。
+2. 双击 **`AttachLinkSetup.exe`**，点 **「一键安装」**；中途弹出的管理员授权点「是」。exe 未签名，Windows 可能弹「已保护你的电脑」——点「更多信息 → 仍要运行」。
 3. 安装完成后**重启 Excel**，在单元格**右键菜单**选择「插入附件链接（可多选）」，或按 **Ctrl+Shift+A**。
 
 需要归档整个文件夹时，右键选择「插入文件夹引用」。
 
 > [!NOTE]
-> 编制人在本机以管理员运行的鼎信诺里插附件，需要标准安装 **+ 方式五**（鼎信诺管理员环境部署）。
+> 「一键安装」= 启用加载项 + 部署鼎信诺环境，编制人在本机以管理员运行的鼎信诺里插附件也一并就绪。
+>
+> **不用鼎信诺、或没有管理员权限**的同事：展开窗口底部的「更多选项」，选「仅安装加载项」。授权被取消时加载项同样已装好，日常 Excel 可直接使用。
 
 > [!TIP]
 > 首次使用前建议跑一遍「五分钟验证流程」；正式归档与网盘交付按「归档交付与同步核对 SOP」执行。
@@ -121,22 +129,26 @@ Excel 加载项（`.xlam`，走「Excel 加载项」通道，**不注册 COM**�
 
 | 你的角色 | 需要的安装 |
 |:---|:---|
-| 接收/复核归档底稿（网盘同步、点链接、跑体检） | **标准安装**（方式一）即可，到此为止 |
-| 归档人（在归档目录运行「归档迁移（批量）」） | **标准安装**（方式一）即可 |
-| 编制人（在本机以管理员运行的鼎信诺里插附件） | 标准安装 **+ 方式五**（鼎信诺管理员环境部署） |
+| 接收/复核归档底稿（网盘同步、点链接、跑体检） | 安装器「一键安装」；没有管理员权限时用「更多选项 → 仅安装加载项」 |
+| 归档人（在归档目录运行「归档迁移（批量）」） | 同上 |
+| 编制人（在本机以管理员运行的鼎信诺里插附件） | 安装器「一键安装」（已含鼎信诺环境部署）；之前只装了加载项的，重新点「一键安装」覆盖安装即可 |
 
 > [!NOTE]
 > 普通超链接不依赖本加载项——未安装的同事也能点开附件链接；安装后额外获得体检/清单/修复等能力。
 
 ### 方式一：安装器（推荐，发给同事用）
 
-双击 **`AttachLinkSetup.exe`**，按窗口按钮操作：标准安装（接收/归档同事）/ 鼎信诺管理员环境部署（编制机，弹 UAC）/ 两级卸载。正式交付包就两个文件：`AttachLinkSetup.exe` + `README.md`（由 `build\make-exe.ps1` 生成于 `release\AttachLink-<版本>\`，exe 内嵌全部所需文件）。
+双击 **`AttachLinkSetup.exe`**，点 **「一键安装」**（v1.4.3 起为默认操作）：先启用加载项，再部署鼎信诺环境，中途弹一次管理员授权。
+
+窗口底部的「更多选项」（默认折叠）提供「仅安装加载项」，给不用鼎信诺、或没有管理员权限的同事；需要卸载时，点「一键卸载」。
+
+正式交付包就两个文件：`AttachLinkSetup.exe` + `README.md`（由 `build\make-exe.ps1` 生成于 `release\AttachLink-<版本>\`，exe 内嵌全部所需文件）。
 
 > [!WARNING]
 > - **首次运行提示**：exe 未签名，Windows 可能弹「已保护你的电脑」——点「更多信息 → 仍要运行」
 > - **zip 下载后**：建议先在 zip 属性页勾选「解除锁定」再解压（避免解压出的所有文件带阻塞标记）
 
-- 静默参数（自动化/高级用户）：`/install`、`/deploy-elevated`、`/uninstall`、`/uninstall-elevated`、`/selfcheck`
+- 静默参数（自动化/高级用户）：`/install-all`（一键安装）、`/install`（仅加载项）、`/deploy-elevated`（仅部署鼎信诺环境，界面无此入口）、`/uninstall`、`/uninstall-elevated`、`/selfcheck`
 - 安装日志：`%TEMP%\AttachLinkSetup.log`
 
 ### 方式二：脚本安装（备用，exe 被安全软件拦截时使用）
@@ -179,7 +191,7 @@ powershell -ExecutionPolicy Bypass -File build\install.ps1 -Uninstall   # 卸载
 
 ### 方式五：机器级看门狗部署（编制机：鼎信诺以管理员运行）
 
-普通双击打开的 Excel 由上面任一方式即可覆盖。但**鼎信诺等审计软件通过 COM 自动化拉起的 Excel 会跳过一切加载项初始化**（OPEN 注册、XLSTART、COM 加载项 OnConnection 全部不触发，本机逐项实测证实）；且鼎信诺常以管理员运行，高完整性进程会忽略 HKCU 的 per-user 注册。此场景需部署**外部看门狗**：
+普通双击打开的 Excel，上面任一安装方式即可覆盖。但**鼎信诺等审计软件通过 COM 自动化拉起的 Excel 会跳过一切加载项初始化**（OPEN 注册、XLSTART、COM 加载项 OnConnection 全部不触发，本机逐项实测证实）；且鼎信诺常以管理员运行，高完整性进程会忽略 HKCU 的 per-user 注册。此场景需部署**外部看门狗**：
 
 ```powershell
 # 管理员 PowerShell 中运行一次（无需注销重登，装完立即生效）
@@ -188,7 +200,23 @@ powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1
 powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1 -Uninstall
 ```
 
-部署内容：xlam + 看门狗复制到 `C:\Program Files\AttachLink\`；HKLM 受信任位置指向该目录；注册登录计划任务（最高权限常驻，隐藏窗口）。之后鼎信诺打开底稿约 2~4 秒内右键菜单自动出现。看门狗日志：`%TEMP%\AttachLinkWatchdog.log`（装载成功行带 xlam 版本号，便于核对两级同版）。
+部署内容：
+
+- xlam + 看门狗复制到 `C:\Program Files\AttachLink\`
+- HKLM 受信任位置指向该目录
+- 注册登录计划任务（最高权限常驻，隐藏窗口）
+
+之后鼎信诺打开底稿约 2~4 秒内右键菜单自动出现。看门狗日志：`%TEMP%\AttachLinkWatchdog.log`（装载成功行带 xlam 版本号，便于核对两级同版；周期行只在 EXCEL7 窗口数变化或每 30 秒心跳时记录）。
+
+> [!NOTE]
+> **看门狗只附着 Microsoft Excel**（v1.4.3 起）。具体规则如下：
+>
+> - **宿主校验**：按窗口类名找到 `EXCEL7` 后，先校验窗口所属进程必须是 `EXCEL.EXE`；否则记一行「跳过 … 仅附着 EXCEL.EXE」，且不做任何调用。WPS 表格为兼容自动化同样使用 `XLMAIN` / `EXCEL7` 窗口类名，旧版看门狗会把加载项注入 WPS，致其卡死或反复弹「同名文件已打开」。
+> - **xlam 缺失时暂停**：xlam 文件缺失（升级 / 卸载进行中）时，看门狗暂停附着，不向任何宿主发起调用。
+> - **附着后释放引用**：每次附着结束即释放对宿主的对象引用。旧版会一直持有引用，被附着过的 Excel 关闭后，进程可能长时间残留在内存里不退出（重新打开会连回旧进程，旧版加载项仍在）；v1.4.3 起看门狗用完即释放。
+> - **已在位即不动**：加载项已随 Excel 正常启动装载的会话，看门狗只确认右键菜单在位，不再重复装载。
+> - **隐藏实例宽限**：对不可见的自动化实例（各类工具、脚本拉起的隐藏 Excel），看门狗先观察一个周期，确认它下一个周期仍在后才处理；宿主里已有同名加载项时，不再打开第二份。
+> - **隐藏窗口不处理**：隐藏的文档窗口（加载项自身的窗口、被隐藏的工作簿）不作为处理对象。Excel 刚开始退出的瞬间，若看门狗恰好对加载项自身的窗口再执行一次装载，实例会退不掉（受控实验中 12 次全部残留），本版予以规避。看门狗在打开加载项、执行初始化之前，都会确认目标窗口仍然存在。
 
 > [!NOTE]
 > **可选：看门狗父进程白名单**（风险收敛，见 [Issue #1](https://github.com/jasonisbrave/attachlink/issues/1)）：部署时加参数 `powershell ... -File build\install-elevated.ps1 -WatchdogParentFilter "sjp7.exe"`，仅附着指定进程拉起的 Excel；默认不启用。
@@ -199,6 +227,8 @@ powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1 -Uninstall
 
 > [!WARNING]
 > **升级注意（两级分别更新）**：新版发布时，已做过方式五部署的机器必须**重跑方式一/三（用户级）+ 重跑本脚本（机器级）**——只跑用户级会让鼎信诺继续用 Program Files 里的旧版。本脚本结束时会输出与 dist 的 SHA-256 核对结果，不一致即说明机器级落后了。
+>
+> **v1.4.2 及更早版本的看门狗会向 WPS 表格注入加载项**：装了 WPS 的机器升级到 v1.4.3 及以上后，务必重跑本脚本更新看门狗（用户级安装结束时会提示）。用安装器的同事再点一次「一键安装」即完成两级更新。
 
 > [!NOTE]
 > 前置条件：先以方式一~三完成普通用户级安装（看门狗只负责鼎信诺场景，日常 Excel 由用户级安装覆盖）。
@@ -275,6 +305,8 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall
 ```
 普通双击打开的 Excel ──► xlam 经 OPEN 注册自动装载（原有机制，正常工作）
 鼎信诺拉起的 Excel   ──► 看门狗（外部 PowerShell 常驻）检测 EXCEL7 文档窗口
+                          └► 宿主校验：窗口所属进程必须是 EXCEL.EXE，否则跳过
+                          │   （WPS 表格复用同样的窗口类名，绝不能被当成 Excel）
                           └► AccessibleObjectFromWindow 取 Application
                           └► Workbooks.Open(xlam) 强制装载（IsAddin 工作簿，
                           │   无可见窗口、不扰动用户；已装载时为 no-op）
@@ -282,7 +314,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall
                           └► 验证右键菜单 Tag 在位，未在位下轮重试
 ```
 
-时序上恰好适配：零工作簿的自动化实例没有 EXCEL7 窗口、不会被附着；鼎信诺打开底稿（出现文档窗口）后下个周期（默认 2 秒）自动完成装载。
+时序上恰好适配：零工作簿的自动化实例没有 EXCEL7 窗口、不会被附着；鼎信诺打开底稿（出现文档窗口）后下个周期（默认 2 秒）自动完成装载。xlam 文件不存在时（升级 / 卸载进行中）看门狗暂停附着，待文件就位后自动恢复，不向任何宿主发起调用。
 
 **提权注意事项**：鼎信诺以管理员运行时，Excel 为高完整性进程——
 
@@ -319,6 +351,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall
 - 「预览」功能有意不做（系统级 QuickLook 类应用已覆盖，避免工具臃肿——2026-11-20 决策）
 - 底稿必须已保存（有基准路径）才能插入
 - 编制端（加载项功能）支持 Windows 桌面版 Excel 与 WPS 表格（v1.3.0 起，需 VBA 环境）；编制端不支持 Mac/网页版。归档件查看（点链接）不受限——任何表格软件均可打开归档件并点击普通超链接
+- 未装 VBA 环境的 WPS 表格里没有 AttachLink 菜单（属 WPS 宿主限制，非缺陷）；此时与 Excel 共存的机器上 Excel 侧功能完整，WPS 不受看门狗影响（v1.4.3 起）
 - 宏被全面禁用且无法配置受信任位置的环境不适用
 
 ---
@@ -337,24 +370,28 @@ excel-attach-addin/
 │   └── AttachLinkShim.cs            # 📦 归档：已废弃的 COM 引导器路线，不再编译
 ├── build/
 │   ├── build.ps1                    # 构建 → dist/AttachLink.xlam
-│   ├── install.ps1                  # 用户级安装 / 卸载（-Uninstall）
+│   ├── install.ps1                  # 用户级安装 / 卸载（-Uninstall）；-ProbeHost 诊断 Excel.Application 实际落到哪个宿主
 │   ├── install-elevated.ps1         # 机器级看门狗部署（鼎信诺管理员场景，管理员运行一次）
 │   └── make-exe.ps1                 # 生成 AttachLinkSetup.exe 安装器 → release/（分发方用）
 ├── packaging/
-│   ├── setup_gui.py                 # 安装器 GUI 外壳（业务逻辑仍走内嵌 ps1，单一事实源）
+│   ├── setup_gui.py                 # 安装器界面（tkinter）：主操作区提供「一键安装」「一键卸载」，底部「更多选项」默认折叠
+│   ├── setup_actions.py             # 安装器动作层：编排内嵌 ps1、退出码解读、结果文案、静默参数（业务逻辑仍走内嵌 ps1，单一事实源）
+│   ├── test_setup_actions.py        # 动作层无头单测（python packaging\test_setup_actions.py，不启动 PowerShell）
 │   ├── run-elevated.ps1             # 提权桥（UAC 启动 + 日志/退出码回传）
 │   └── elevated-capture.ps1         # 提权侧输出捕获包装器
 ├── scripts/
 │   ├── setup.ps1                    # 安装/卸载编排（备用命令行入口，见方式二）
-│   ├── watchdog.ps1                 # 外部看门狗：为自动化拉起的 Excel 装载 xlam
+│   ├── watchdog.ps1                 # 外部看门狗：为自动化拉起的 Excel 装载 xlam（仅附着 EXCEL.EXE）
 │   │                                #   ⚠ 必须保存为 UTF-8 with BOM（PS5.1 按 ANSI 误读
 │   │                                #     无 BOM 文件，中文注释乱码可吞换行破坏 C# 编译）
-│   ├── test-chain.ps1               # 全链路回归测试（自动化拉起 Excel × 看门狗，期望 RESULT: PASS）
+│   ├── test-chain.ps1               # 全链路回归测试（自动化拉起 Excel × 看门狗；含关后即退与预热生命周期检查，期望 RESULT: PASS）
 │   ├── test-migrate.ps1             # 归档迁移功能测试（夹具：账套附件夹 × 归档底稿，期望 RESULT: PASS）
 │   ├── test-hash.ps1                # 内容基线生命周期测试（登记→篡改→重建→复检，期望 RESULT: PASS）
 │   ├── test-version.ps1             # 附件版本更新生命周期测试（v1→v2→留痕，期望 RESULT: PASS）
 │   ├── test-folder.ps1              # 文件夹引用 / 二级菜单 / 复核修复回归（25 断言，期望 RESULT: PASS）
 │   ├── test-wps.ps1                 # WPS 兼容验证（ket.Application COM 自动化，期望 RESULT: PASS）
+│   ├── test-wps-coexist.ps1         # 看门狗 × WPS 共存回归（仿冒 XLMAIN/EXCEL7 窗口必须被跳过；装 WPS 的机器另跑真实实例段）
+│   ├── test-watchdog-units.ps1      # 单元级回归（装载判定的假对象用例、同名异路径副本负向场景、隐藏文档窗口规则、安装脚本宿主识别 fail-closed、路径比较）
 │   └── watchdog_launcher.vbs        # 计划任务隐藏启动器（纯 ASCII，部署到 Program Files）
 ├── dist/                            # 构建产物（分发给同事时必须包含 AttachLink.xlam）
 ├── README.md                        # 使用说明 + 双重复核记录

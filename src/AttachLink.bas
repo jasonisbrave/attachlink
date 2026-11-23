@@ -55,6 +55,12 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.4.3：与 WPS 共存修复——看门狗只附着 EXCEL.EXE（WPS 表格复用 XLMAIN/EXCEL7 类名，
+'       旧版会把 xlam 注入 WPS，致其卡在「正在打开文档」或反复弹「同名文件已打开」）；
+'       安装器宿主识别（Excel.Application 被 WPS 接管时改走 CLSID）；看门狗日志改心跳、
+'       xlam 缺失时暂停附着。本版 VBA 功能无变化，仅版本号
+' 1.4.2：一键卸载整合（用户级 + 机器级看门狗）+ OPEN/OPENn 残留清理与序列重排 + 复核修复批
+' 1.4.1：删除附件入口双层根因修复（AttachLink_DeleteAttachmentCore）
 ' 1.4.0：附件删除（删链接+删文件+基线清理）/ 底稿引用（跨底稿交叉索引）/
 '       IsAttachmentLink 识别 ..\ 形态 / 批量操作逐文件故障隔离
 '       （导出交付包曾实现后于 2026-11-23 按用户决策下线（代码归档移出，回退任务 T1）；
@@ -64,7 +70,7 @@ Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ■ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.4.2"
+Public Const ATTACHLINK_VERSION As String = "1.4.3"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"

@@ -7,11 +7,87 @@
 #       并注册启用为 Excel 加载项
 # 说明: 加载项登记（Options\OPENn）只存文件名、由 Excel 按库目录解析，
 #       因此文件必须位于库目录根下，无法放入专用子目录（已实证）。
+# 宿主识别（v1.4.3）: Excel 与 WPS 共存的机器上，若 WPS 开启了「兼容第三方系统和
+#       软件」，Excel.Application 这个 ProgID 会被解析到 WPS 表格——旧版会把加载项
+#       「注册」进一个隐藏的 WPS 实例，真正的 Excel 侧什么都没装。现按 Application.Path
+#       判别宿主（WPS 的 Name/Version 均伪装成 Excel），命中 WPS 即改用 Excel 固定
+#       CLSID 直接激活。诊断：powershell -ExecutionPolicy Bypass -File install.ps1 -ProbeHost
 # =====================================================================
-param([switch]$Uninstall)
+param(
+    [switch]$Uninstall,
+    # 诊断模式：只识别「Excel.Application」实际落到哪个宿主，不安装/卸载。退出码 0 = Microsoft Excel
+    [switch]$ProbeHost,
+    # 首选激活用的 ProgID（默认 Excel.Application；诊断时可换成 ket.Application 以演练「被 WPS 接管」分支）
+    [string]$ExcelProgId = 'Excel.Application'
+)
 
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+
+# ---- Excel 宿主识别（Excel 与 WPS 共存环境）----
+$excelClsid = '00024500-0000-0000-C000-000000000046'   # Excel.Application 的 CLSID：Excel 自身注册，不随 ProgID 改写而变
+function Test-IsNotRealExcel($app) {
+    # 判定「不能当作 Microsoft Excel 使用」：Application.Path 含 kingsoft / wps（WPS 表格的 Name、Version 都
+    # 伪装成 Excel，Path 才如实），或 Path 读不到 / 为空。读不到时同样返回 $true——无法确认是 Excel 就不往里装
+    # （fail-closed）：调用方会丢弃该实例、改走 Excel 自身 CLSID 激活，仍无法确认则明确报错。
+    $p = ''
+    try { $p = [string]$app.Path } catch { $p = '' }
+    return [bool]((-not $p) -or ($p -match '(?i)kingsoft|wps'))
+}function Release-Host($app) {
+    try { $app.Quit() } catch {}
+    try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) } catch {}
+}
+function New-RealExcel {
+    # 返回真正的 Microsoft Excel Application 对象（调用方负责 Quit + 释放）
+    $app = $null
+    # Excel COM 创建有竞态（前一实例退出中会失败），重试 3 次
+    foreach ($attempt in 1..3) {
+        try { $app = New-Object -ComObject $ExcelProgId; break }
+        catch {
+            if ($attempt -eq 3) { throw '未检测到可用的桌面版 Excel（无法创建 Excel.Application），请先安装 Office Excel 再运行安装。' }
+            Start-Sleep -Seconds 2
+        }
+    }
+    if (-not (Test-IsNotRealExcel $app)) { return $app }
+
+    # 「Excel.Application」被解析到 WPS（或宿主身份无法确认）：丢弃该实例，改经 Excel 自身 CLSID 激活
+    $wpsPath = ''
+    try { $wpsPath = [string]$app.Path } catch {}
+    Release-Host $app
+    $app = $null
+    Write-Host ''
+    Write-Host "  注意：「Excel.Application」当前解析到 WPS 表格（$wpsPath），已改用 Excel 自身 CLSID 直接激活。"
+    Write-Host '  根因通常是 WPS「配置工具 → 高级 → 兼容设置」勾选了「WPS Office 兼容第三方系统和软件」；'
+    Write-Host '  该选项会让所有依赖 Excel COM 的软件（含鼎信诺）拿到 WPS，建议关闭。'
+    try {
+        $t = [type]::GetTypeFromCLSID([guid]$excelClsid)
+        if (-not $t) { throw 'Excel 的 COM 类未注册' }
+        $app = [Activator]::CreateInstance($t)
+    } catch {
+        throw ('未检测到可用的桌面版 Excel：「Excel.Application」未解析到 Microsoft Excel，且按 CLSID 也无法启动它。' +
+            "请先安装 Office Excel，或在 WPS 中关闭「兼容第三方系统和软件」后重试。（$($_.Exception.Message)）")
+    }
+    if (Test-IsNotRealExcel $app) {
+        Release-Host $app
+        throw '未检测到可用的桌面版 Excel：按 CLSID 激活得到的仍不是 Microsoft Excel，请确认本机已安装 Office Excel。'
+    }
+    return $app
+}
+
+if ($ProbeHost) {
+    # 诊断模式：不安装/卸载，不写注册表，不复制文件
+    $app = $null
+    try {
+        $app = New-RealExcel
+        Write-Host "宿主识别: Microsoft Excel  ProgID=$ExcelProgId  路径=$($app.Path)  版本=$($app.Version)"
+        exit 0
+    } catch {
+        Write-Host "宿主识别失败: $($_.Exception.Message)"
+        exit 1
+    } finally {
+        if ($app) { Release-Host $app }
+    }
+}
 
 $addInsDir = Join-Path $env:APPDATA 'Microsoft\AddIns'
 $distXlam  = Join-Path $PSScriptRoot '..\dist\AttachLink.xlam'
@@ -43,7 +119,13 @@ if (-not $Uninstall) {
         Copy-Item $distXlam $destXlam -Force
         Unblock-File $destXlam -ErrorAction SilentlyContinue   # 清除下载标记（MOTW），防止宏被静默拦截
     } catch {
-        throw '复制文件失败（文件可能被打开的 Excel 占用），请先关闭 Excel 后重试。'
+        # 占用方诊断：Excel 与 WPS 共存时，WPS 表格启动会沿用 Excel 的加载项注册把 AttachLink 一并加载，
+        # 此时只关 Excel 不够（2026-11-23 实测：WPS 12.1 启动即加载库目录副本）
+        $who = '文件可能被打开的 Excel 占用，请先关闭 Excel 后重试。'
+        if (Get-Process -Name et -ErrorAction SilentlyContinue) {
+            $who = '检测到 WPS 表格（et.exe）正在运行——WPS 启动时可能已自动加载 AttachLink 并占用该文件。请同时关闭 WPS 表格后重试。'
+        }
+        throw ('复制文件失败。' + $who)
     }
     Remove-Item $legacySub -Recurse -Force -ErrorAction SilentlyContinue
 
@@ -73,19 +155,8 @@ if (-not $Uninstall) {
     try { $xlamHash = ([BitConverter]::ToString($shaProv.ComputeHash($fsHash)) -replace '-', '').Substring(0, 16) }
     finally { $fsHash.Close(); $shaProv.Dispose() }
     Write-Host ("已安装用户级加载项：{0}（SHA-256 前16位 {1}）" -f $destXlam, $xlamHash)
-    # Excel COM 创建有竞态（前一实例退出中会失败），重试 3 次
-    $excel = $null
-    foreach ($attempt in 1..3) {
-        try {
-            $excel = New-Object -ComObject Excel.Application
-            break
-        } catch {
-            if ($attempt -eq 3) {
-                throw '未检测到可用的桌面版 Excel（无法创建 Excel.Application），请先安装 Office Excel 再运行安装。'
-            }
-            Start-Sleep -Seconds 2
-        }
-    }
+    # 经宿主识别取得真正的 Excel（Excel.Application 被 WPS 接管时自动改走 CLSID；创建竞态重试见函数内）
+    $excel = New-RealExcel
     try {
         # AddIns.Add 在没有任何打开工作簿的纯 COM 实例上会报错，先建一个临时工作簿
         $wbTmp = $excel.Workbooks.Add()
@@ -105,19 +176,38 @@ if (-not $Uninstall) {
 
     # ---- 自动检测机器级部署是否需要同步（T6 落地：防止升级漏跑第二步）----
     $pfXlam = 'C:\Program Files\AttachLink\AttachLink.xlam'
-    if (Test-Path $pfXlam) {
+    $pfWd   = 'C:\Program Files\AttachLink\watchdog.ps1'
+    # v1.4.3 起看门狗带宿主校验（日志标记「仅附着 EXCEL.EXE」）；旧版会把 xlam 注入 WPS 表格
+    $wdOutdated = $false
+    if (Test-Path $pfWd) {
+        try { $wdOutdated = -not ([IO.File]::ReadAllText($pfWd, [Text.Encoding]::UTF8).Contains('仅附着 EXCEL.EXE')) } catch {}
+    }
+    # 半部署：机器级目录里有 xlam 却没有看门狗脚本（部署中断 / 被杀软误删），鼎信诺场景会静默失效
+    $wdMissing = (Test-Path $pfXlam) -and -not (Test-Path $pfWd)
+    if ((Test-Path $pfXlam) -or $wdOutdated -or $wdMissing) {
         try {
-            $shaProv = [System.Security.Cryptography.SHA256]::Create()
-            $fsA = [IO.File]::OpenRead($destXlam)
-            try { $hLocal = [BitConverter]::ToString($shaProv.ComputeHash($fsA)) -replace '-', '' } finally { $fsA.Close() }
-            $fsB = [IO.File]::OpenRead($pfXlam)
-            try { $hPf = [BitConverter]::ToString($shaProv.ComputeHash($fsB)) -replace '-', '' } finally { $fsB.Close(); $shaProv.Dispose() }
-            if ($hLocal -ne $hPf) {
+            $hLocal = ''; $hPf = ''
+            if (Test-Path $pfXlam) {
+                $shaProv = [System.Security.Cryptography.SHA256]::Create()
+                $fsA = [IO.File]::OpenRead($destXlam)
+                try { $hLocal = [BitConverter]::ToString($shaProv.ComputeHash($fsA)) -replace '-', '' } finally { $fsA.Close() }
+                $fsB = [IO.File]::OpenRead($pfXlam)
+                try { $hPf = [BitConverter]::ToString($shaProv.ComputeHash($fsB)) -replace '-', '' } finally { $fsB.Close(); $shaProv.Dispose() }
+            }
+            if ($hLocal -ne $hPf -or $wdOutdated -or $wdMissing) {
                 Write-Host ''
                 Write-Host '==================================================================='
-                Write-Host '  ⚠ 检测到鼎信诺管理员环境部署与用户级版本不一致（需同步更新）'
-                Write-Host '  本机如需在鼎信诺中使用，请再执行一次「鼎信诺管理员环境部署」：'
-                Write-Host '  AttachLinkSetup.exe → 点「鼎信诺管理员环境部署」按钮（弹 UAC）'
+                if ($wdMissing) {
+                    Write-Host '  ⚠ 机器级部署不完整：C:\Program Files\AttachLink\ 里有 AttachLink.xlam，却没有 watchdog.ps1（鼎信诺里不会出现右键菜单）'
+                    Write-Host '  请重新运行安装器点「一键安装」补全：'
+                } elseif ($wdOutdated) {
+                    Write-Host '  ⚠ 检测到机器级看门狗仍为旧版：它会把加载项注入 WPS 表格（WPS 卡在「正在打开文档」或反复弹「同名文件已打开」）'
+                    Write-Host '  v1.4.3 起看门狗只附着 EXCEL.EXE——请重新运行安装器点「一键安装」完成更新：'
+                } else {
+                    Write-Host '  ⚠ 检测到鼎信诺管理员环境部署与用户级版本不一致（需同步更新）'
+                    Write-Host '  本机如需在鼎信诺中使用，请再点一次「一键安装」（覆盖安装加载项并部署鼎信诺环境，弹一次 UAC）：'
+                }
+                Write-Host '  AttachLinkSetup.exe →「一键安装」'
                 Write-Host '  或管理员 PowerShell: powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1'
                 Write-Host '==================================================================='
             }
@@ -126,12 +216,11 @@ if (-not $Uninstall) {
 }
 else {
     try {
-        $excel = New-Object -ComObject Excel.Application
+        $excel = New-RealExcel      # 失败（无 Excel，或被 WPS 接管且无真 Excel）→ 下方跳过注销
         try {
             $excel.AddIns.Item('AttachLink').Installed = $false
         } catch {}
-        $excel.Quit()
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel)
+        Release-Host $excel
     } catch {
         Write-Host '未检测到 Excel，跳过加载项注销，直接清理文件。'
     }
