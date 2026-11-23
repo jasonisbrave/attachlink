@@ -1,6 +1,6 @@
 # AttachLink —— 审计底稿附件链接加载项
 
-[![Release v1.3.0](https://img.shields.io/badge/Release-v1.3.0-217346)](https://github.com/jasonisbrave/attachlink/releases)
+[![Release v1.4.3](https://img.shields.io/badge/Release-v1.4.3-217346)](https://github.com/jasonisbrave/attachlink/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-217346)](https://github.com/jasonisbrave/attachlink/blob/main/LICENSE)
 ![Platform Windows](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
 ![Excel 2010+](https://img.shields.io/badge/Excel-2010%2B-217346?logo=microsoftexcel&logoColor=white)
