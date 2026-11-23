@@ -114,6 +114,26 @@ else {
     } catch {
         Write-Host '未检测到 Excel，跳过加载项注销，直接清理文件。'
     }
+    # ---- 清理加载项列表残留（OPEN / OPENn）----
+    # Excel 的 Installed=False 只把 OPENn 标记为 /A 禁用，并不删除条目，
+    # 导致「选项-加载项」里仍挂着 AttachLink（右键菜单的加载入口视觉残留）。
+    # 按路径精确删除，第三方加载项一律保留；不依赖 Excel 是否可用。
+    foreach ($v in @('16.0', '15.0', '14.0')) {
+        $optKey = "HKCU:\Software\Microsoft\Office\$v\Excel\Options"
+        if (-not (Test-Path $optKey)) { continue }
+        $props = @((Get-ItemProperty -LiteralPath $optKey).PSObject.Properties |
+                   Where-Object { $_.Name -like 'OPEN*' -and $_.Value -is [string] })
+        $removed = 0
+        foreach ($p in $props) {
+            $entry = $p.Value.Trim().Trim('"')
+            if ($entry -match '^(/[Aa]|\\[Aa])\s+') { $entry = $entry.Substring(2).Trim().Trim('"') }
+            if (($entry -ieq $destXlam) -or ($entry -ieq 'AttachLink.xlam')) {
+                Remove-ItemProperty -LiteralPath $optKey -Name $p.Name -ErrorAction SilentlyContinue
+                $removed++
+            }
+        }
+        if ($removed -gt 0) { Write-Host ("已清理 Office {0} 加载项列表残留条目 {1} 项。" -f $v, $removed) }
+    }
     if (Test-Path $destXlam) {
         # Excel COM Quit 为异步：文件锁释放有延迟，重试删除（最多约 8 秒）
         $n = 0
@@ -130,6 +150,6 @@ else {
     Remove-Item 'HKCU:\Software\Classes\AttachLinkShim.Connect' -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item 'HKCU:\Software\Classes\CLSID\{D4F8A1C2-93B7-4E5A-8C6D-2F1E9B7A4C58}' -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $addInsDir 'AttachLinkShim.dll') -Force -ErrorAction SilentlyContinue
-    Write-Host '卸载完成。'
-    Write-Host '如加载项列表仍有残留条目，可在 Excel「选项-加载项-管理: Excel 加载项-转到」中手动移除。'
+    Write-Host '卸载完成（含右键菜单入口：加载项列表残留已清理）。'
+    Write-Host '若曾在别的路径手动加载过本加载项副本，请在 Excel「选项-加载项-管理: Excel 加载项-转到」中手动移除。'
 }

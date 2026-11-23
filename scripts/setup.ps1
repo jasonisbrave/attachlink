@@ -91,7 +91,7 @@ else {
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $buildDir 'install.ps1') -Uninstall
     if ($LASTEXITCODE -ne 0) { throw '卸载失败，请把上方错误信息反馈给分发人。' }
     Write-Host ''
-    Write-Host '卸载完成（用户级：日常 Excel 中的右键菜单/快捷键已移除）。'
+    Write-Host '卸载完成（用户级：日常 Excel 中的右键菜单/快捷键已移除，加载项列表残留同步清理）。'
     Write-Host '注意：本卸载不含机器级看门狗。若本机曾以管理员运行过'
     Write-Host '      build\install-elevated.ps1（鼎信诺场景），请另行在管理员'
     Write-Host '      PowerShell 运行：powershell -ExecutionPolicy Bypass -File'

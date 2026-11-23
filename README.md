@@ -393,7 +393,7 @@ powershell -ExecutionPolicy Bypass -File build\build.ps1
 | E4 | 中 | build.ps1 只探测 16.0/15.0，与 README「Excel 2010+」不符；兜底硬建 16.0 键 | ✅ 已修复：探测 14.0~16.0；HKLM 判定已装版本；无 Excel 直接报错 |
 | E5 | 中 | 保存归一化每链接新建 FSO、无预过滤，大底稿每次保存卡顿 | ✅ 已修复：IsAttachmentLink 复用调用方 FSO + 附件文件夹名预过滤（4 处调用点已传参） |
 | E6 | 低 | 受信任位置 Date 格式与 Excel 原生不一致 | ✅ 已修复：MM/dd/yyyy |
-| E7 | 低 | 卸载不清理加载项列表 OPEN 残留条目 | ⏳ 待办（已提示手动移除路径） |
+| E7 | 低 | 卸载不清理加载项列表 OPEN 残留条目 | ✅ 已修复：卸载时按路径精确清理 OPEN/OPENn 中指向 AttachLink.xlam 的条目（含 `/A` 禁用形式与库目录相对名），第三方加载项保留 |
 | E8 | 低 | 插入 Fail 分支未防御性恢复 ScreenUpdating | ✅ 已修复 |
 | E9 | 低 | 清除链接无选区大小护栏 | ✅ 已修复：同插入路径 10000 上限 |
 | E10 | 低 | 断链修复同名文件跨子目录按文件名合并重连 | 📌 知悉（概率低，附件清单可核对） |
