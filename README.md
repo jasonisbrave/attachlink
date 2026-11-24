@@ -1,6 +1,6 @@
 # AttachLink —— 审计底稿附件链接加载项
 
-[![Release v1.4.3](https://img.shields.io/badge/Release-v1.4.3-217346)](https://github.com/jasonisbrave/attachlink/releases)
+[![Release v1.4.4](https://img.shields.io/badge/Release-v1.4.4-217346)](https://github.com/jasonisbrave/attachlink/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-217346)](https://github.com/jasonisbrave/attachlink/blob/main/LICENSE)
 ![Platform Windows](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
 ![Excel 2010+](https://img.shields.io/badge/Excel-2010%2B-217346?logo=microsoftexcel&logoColor=white)
@@ -243,12 +243,17 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall
 
 一键卸载会自动完成以下步骤：
 
-1. 执行用户级卸载（加载项注册 / 受信任位置 / APPDATA 副本）
+1. 执行用户级卸载：清理加载项注册与加载项列表登记、受信任位置及 APPDATA 副本
 2. 检测机器级足迹（计划任务 / Program Files / HKLM 信任位置）
 3. 检测到机器级足迹时，弹**一次** UAC，一并卸载看门狗
 4. 按残留事实核验并如实报告
 
 对于已在运行的 Excel 会话，右键菜单会保留到该会话关闭；重启 Excel 后不再出现。
+
+- **卸载后重新安装失败**（提示「加载项注册失败……加载项注册后未处于启用状态」）：通常是 v1.4.3 及更早版本安装器的问题，升级到 v1.4.4 及以上后重新「一键安装」。
+- **卸载未完全成功**（提示「卸载未完全成功（加载项列表清理未完全成功）」）：先关闭所有 Excel 再重新卸载；仍不行再看日志里的警告。
+
+以上两项的详细说明见 [FAQ「安装与菜单」](FAQ.md#安装与菜单)。
 
 ---
 
@@ -337,7 +342,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall
 | `HOTKEY_INSERT` | `"^+a"` | 插入附件链接快捷键（`""` = 禁用） |
 | `HOTKEY_INDEX` | `"^+k"` | 附件清单快捷键 |
 | `INDEX_SHEET_NAME` | `"附件清单"` | 清单工作表名 |
-| `ATTACHLINK_VERSION` | `"1.0.0"` | 版本号（单一事实源：安装器标题/自检、两级部署哈希核对均引用） |
+| `ATTACHLINK_VERSION` | `"1.4.4"` | 版本号（单一事实源：安装器标题/自检、两级部署哈希核对均引用） |
 
 ## 常见问题
 
@@ -395,7 +400,7 @@ excel-attach-addin/
 │   └── watchdog_launcher.vbs        # 计划任务隐藏启动器（纯 ASCII，部署到 Program Files）
 ├── dist/                            # 构建产物（分发给同事时必须包含 AttachLink.xlam）
 ├── README.md                        # 使用说明 + 双重复核记录
-├── WORKLOG.md                       # 交接日志（根因实证 #1~#18 + 验证记录）
+├── WORKLOG.md                       # 交接日志（根因实证、修复批次与验证记录）
 └── 开发交接.md                       # 技术实现路径 + 痛点改进任务书（面向后续开发）
 ```
 
@@ -436,7 +441,7 @@ powershell -ExecutionPolicy Bypass -File build\build.ps1
 | O8 | 中 | 「互不读写」表述过强；应用级保存事件与鼎信诺同处一条保存链 | ✅ README 措辞已修正；归一化保持窄范围幂等；⏳ 待办：归一化失败可见性 |
 | O9 | 中 | OnKey 全局绑定可能覆盖其他加载项绑定，关闭时清空而非恢复（VBA 无法读取原绑定） | 📌 已知限制；🔭 演进：Ribbon/customUI |
 | O10 | 中 | 配置为源码常量，重装覆盖用户定制，无迁移机制 | 🔭 演进：外置 INI 配置 + 安装保留迁移 |
-| O11 | 中 | 无版本号/旧实例检测，旧路径安装残留可能双实例 | ⏳ 待办：升级前枚举注销旧实例 |
+| O11 | 中 | 无版本号/旧实例检测，旧路径安装残留可能双实例 | v1.4.4 起安装前自动清理指向其他路径的同名登记，旧路径残留不再遮蔽库目录副本（见 FAQ）。<br>⏳ 待办：升级前枚举注销旧实例 |
 | O12 | 高 | 把整个 AddIns 目录及子目录加入受信任位置，信任范围过大 | ✅ 部分采纳：AllowSubFolders=0 收窄至目录本身；专用子目录方案经实证不可行（加载项登记机制只存文件名、按库目录根解析），权衡已记录 |
 | O13 | 高 | AccessVBOM 首次写入在 try/finally 之前，异常可能不还原；分发包缺产物时自动在同事机器开启 VBOM 构建 | ✅ 已修复：开关移入 try 内、探测 14.0~16.0、无 Excel 直接报错；缺产物改为默认退出、显式输入 B 才现场构建 |
 | O14 | 中 | 分发无签名/哈希校验，接收方无法确认包完整性 | 🔭 演进：版本号 + SHA-256 清单 + 签名，走 IT 渠道分发 |
@@ -460,7 +465,7 @@ powershell -ExecutionPolicy Bypass -File build\build.ps1
 | E4 | 中 | build.ps1 只探测 16.0/15.0，与 README「Excel 2010+」不符；兜底硬建 16.0 键 | ✅ 已修复：探测 14.0~16.0；HKLM 判定已装版本；无 Excel 直接报错 |
 | E5 | 中 | 保存归一化每链接新建 FSO、无预过滤，大底稿每次保存卡顿 | ✅ 已修复：IsAttachmentLink 复用调用方 FSO + 附件文件夹名预过滤（4 处调用点已传参） |
 | E6 | 低 | 受信任位置 Date 格式与 Excel 原生不一致 | ✅ 已修复：MM/dd/yyyy |
-| E7 | 低 | 卸载不清理加载项列表 OPEN 残留条目 | ✅ 已修复：卸载时按路径精确清理 `OPEN` / `OPENn` 中指向 `AttachLink.xlam` 的条目（含 `/A` 禁用形式、库目录相对名与 `*\AttachLink\AttachLink.xlam` 后缀形态），第三方条目保留；删除后**重排剩余序列为连续编号**（OPEN 系列读到缺口即停，断档会连坐其后的第三方加载项）。<br>方案源自 PR #2 复核（YehOlt），实现与序列重排随 v1.4.2 落地 |
+| E7 | 低 | 卸载不清理加载项列表 OPEN 残留条目 | ✅ 已修复：<br>① **卸载时清理 OPEN 序列**：清理 `OPEN` / `OPENn` 中指向 `AttachLink.xlam` 的条目（含 `/A` 禁用形式；按文件名匹配，任意目录下的同名副本都算），第三方条目保留；删除后**重排剩余序列为连续编号**（OPEN 系列读到缺口即停，断档会连坐其后的第三方加载项）。<br>② **v1.4.4 起补充处理**：卸载时一并清理 `Add-in Manager` 里的同名登记；安装前清掉指向其他路径的登记——否则 Excel 会按文件名绑定到旧条目：旧条目已悬空时，卸载后重新安装报「未处于启用状态」；旧文件还在时则登记到的不是库目录副本（见 FAQ）。<br>方案源自 PR #2 复核（YehOlt），实现与序列重排随 v1.4.2 落地 |
 | E8 | 低 | 插入 Fail 分支未防御性恢复 ScreenUpdating | ✅ 已修复 |
 | E9 | 低 | 清除链接无选区大小护栏 | ✅ 已修复：同插入路径 10000 上限 |
 | E10 | 低 | 断链修复同名文件跨子目录按文件名合并重连 | 📌 知悉（概率低，附件清单可核对） |

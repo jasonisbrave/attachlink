@@ -55,6 +55,10 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.4.4：修复「卸载后重新安装」失败（提示「加载项注册后未处于启用状态」）——Excel 的加载项列表
+'       按文件名识别条目，机器级看门狗登记过 Program Files 副本的机器上，卸载留下的悬空登记会让
+'       重新安装绑定到它；现安装前自动清理并核对绑定的是库目录副本，卸载时一并清理 Add-in Manager
+'       登记。仅安装脚本变更，本版 VBA 功能无变化，仅版本号
 ' 1.4.3：与 WPS 共存修复——看门狗只附着 EXCEL.EXE（WPS 表格复用 XLMAIN/EXCEL7 类名，
 '       旧版会把 xlam 注入 WPS，致其卡在「正在打开文档」或反复弹「同名文件已打开」）；
 '       安装器宿主识别（Excel.Application 被 WPS 接管时改走 CLSID）；看门狗日志改心跳、
@@ -70,7 +74,7 @@ Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ■ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.4.3"
+Public Const ATTACHLINK_VERSION As String = "1.4.4"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"

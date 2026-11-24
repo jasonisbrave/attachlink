@@ -1,5 +1,5 @@
 ﻿# =====================================================================
-# AttachLink 看门狗 / 安装脚本 —— 单元级回归（v1.4.3）
+# AttachLink 看门狗 / 安装脚本 —— 单元级回归（v1.4.4）
 # ---------------------------------------------------------------------
 # A. 看门狗装载判定（用假对象逐条覆盖，不依赖 Excel）：宿主里在位的副本是否就是看门狗配置的那一份，
 #    决定「能否执行初始化宏」。只有 trusted 才允许；查询出错不得当成「不在位」去打开第二份。
@@ -12,6 +12,8 @@
 # D. 路径比较与 Release-Com 的容错。
 # E. 隐藏的文档窗口不作为处理对象（真实 Excel，隐藏实例）：加载项自身的隐藏窗口零处理；被隐藏的工作簿窗口
 #    显示出来之后才处理。
+# F. 加载项列表登记清理（build\install.ps1，临时注册表键，不依赖 Excel）：Excel 的加载项列表按文件名识别
+#    条目，安装前清掉指向其他路径的 AttachLink 登记、卸载时清掉全部；删 OPEN 条目后序列必须仍然连续。
 # 用法：powershell -ExecutionPolicy Bypass -File test-watchdog-units.ps1      期望末行 RESULT: PASS
 # 需要：桌面版 Excel（B、E 段用隐藏实例，不弹窗口）。本机常驻看门狗若与被测脚本版本不一致，B、E 段整段跳过
 #       （它会对同一实例做自己的动作，结果无法归因）。
@@ -257,6 +259,271 @@ Check (Test-IsNotRealExcel ([pscustomobject]@{ Path = '' })) 'Path 为空 → �
 Check (Test-IsNotRealExcel ([pscustomobject]@{})) '读不到 Path → 判为「不是 Excel」（fail-closed）'
 
 # ---------------------------------------------------------------------
+'=== F. 加载项列表登记清理（build\install.ps1，临时注册表键，不依赖 Excel）==='
+# Excel 的加载项列表按【文件名】识别条目：AddIns.Add(路径) 遇到同名条目直接返回它（2026-11-24 实测）。
+# 安装前必须清掉指向其他路径的 AttachLink 登记（Add-in Manager / OPENn），卸载时清掉全部——否则机器级
+# 卸载留下的悬空登记会让「卸载后重装」绑定到它、Installed 置位静默失败。删除 OPEN 条目必须保持序列连续。
+$regText = Get-FunctionsText $installPath @('ConvertFrom-AddInEntry', 'Test-IsAttachLinkEntry', 'Test-IsLibraryEntry', 'Test-SamePath', 'Remove-OpenEntries', 'Remove-AddInManagerEntries', 'Clear-AddInListRegistrations', 'Get-ExcelProcessIds', 'Test-ProcessAlive', 'Wait-HostExit', 'Get-NewExcelProcessIds', 'Invoke-AddInUnregister', 'Test-DisabledItemsBlob', 'Get-DisabledItemsHint')
+Check ($regText.Contains('function ConvertFrom-AddInEntry') -and $regText.Contains('function Test-IsAttachLinkEntry') -and $regText.Contains('function Test-IsLibraryEntry') -and $regText.Contains('function Remove-OpenEntries') -and $regText.Contains('function Remove-AddInManagerEntries') -and $regText.Contains('function Clear-AddInListRegistrations') -and $regText.Contains('function Wait-HostExit') -and $regText.Contains('function Invoke-AddInUnregister') -and $regText.Contains('function Test-ProcessAlive') -and $regText.Contains('function Test-DisabledItemsBlob') -and $regText.Contains('function Get-DisabledItemsHint')) '取到 install.ps1 的加载项登记函数'
+. ([scriptblock]::Create($regText))
+$destXlam = 'C:\Users\u\AppData\Roaming\Microsoft\AddIns\AttachLink.xlam'      # install.ps1 由 $env:APPDATA 推出的库目录副本；函数调用时读取
+$officeVersions = @('16.0', '15.0', '14.0')
+$pfX = 'C:\Program Files\AttachLink\AttachLink.xlam'
+
+Check ((ConvertFrom-AddInEntry '"AttachLink.xlam"') -eq 'AttachLink.xlam') 'F OPEN 值归一化：去掉引号'
+Check ((ConvertFrom-AddInEntry '  "C:\Program Files\ExcelEnhancer\ExcelEnhancer.xlam" ') -eq 'C:\Program Files\ExcelEnhancer\ExcelEnhancer.xlam') 'F OPEN 值归一化：去首尾空白与引号'
+Check ((ConvertFrom-AddInEntry '/A "C:\Program Files\AttachLink\AttachLink.xlam"') -eq $pfX) 'F OPEN 值归一化：去掉 /A（禁用）前缀'
+Check ((Test-IsAttachLinkEntry 'AttachLink.xlam') -and (Test-IsAttachLinkEntry $pfX) -and (Test-IsAttachLinkEntry $destXlam)) 'F 库目录副本与其他路径的同名副本都识别为 AttachLink 登记'
+Check ((Test-IsAttachLinkEntry 'C:\Tools\AttachLinkCopy\attachlink.xlam') -and (Test-IsAttachLinkEntry 'D:/x/y/AttachLink.xlam')) 'F 任意目录下的同名副本都识别为 AttachLink 登记（目录名不必叫 AttachLink；大小写、分隔符不敏感）'
+Check (-not (Test-IsAttachLinkEntry 'C:\A\AttachLink2.xlam') -and -not (Test-IsAttachLinkEntry 'C:\A\AttachLink.xlam.bak') -and -not (Test-IsAttachLinkEntry 'C:\A\AttachLinkHelper.xlam')) 'F 名字相近的其他文件不误判'
+Check (-not (Test-IsAttachLinkEntry 'C:\Program Files\ExcelEnhancer\ExcelEnhancer.xlam')) 'F 第三方加载项不误判'
+Check (-not (Test-IsAttachLinkEntry '/R "C:\A\AuditCatAttachment.xll"')) 'F 第三方 XLL（带 /R 前缀的原始值）不误判'
+Check ((Test-IsLibraryEntry 'attachlink.xlam') -and (Test-IsLibraryEntry $destXlam) -and -not (Test-IsLibraryEntry $pfX)) 'F 库目录登记：文件名 / 库目录完整路径算，Program Files 副本不算'
+
+$regBase = 'HKCU:\Software\AttachLinkUnitsTest'
+Remove-Item $regBase -Recurse -Force -ErrorAction SilentlyContinue
+function Set-OpenSeq([string]$Key, [object[]]$Pairs) {
+    # 按给定顺序写 OPEN 序列（每项为 @(名, 值)）；先清空键，每个用例都从干净状态开始
+    Remove-Item $Key -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -Path $Key -Force | Out-Null
+    foreach ($p in $Pairs) { New-ItemProperty -LiteralPath $Key -Name $p[0] -Value $p[1] -PropertyType String -Force | Out-Null }
+}
+function Get-OpenSeq([string]$Key) {
+    # 现存 OPEN 序列（按序号），输出 "名=[值]"，分号连接
+    $items = @((Get-ItemProperty -LiteralPath $Key).PSObject.Properties |
+        Where-Object { $_.Name -match '^OPEN(\d+)?$' -and $_.Value -is [string] } |
+        Sort-Object { [int]($_.Name -replace '\D', '') } | ForEach-Object { '{0}=[{1}]' -f $_.Name, $_.Value })
+    return ($items -join ';')
+}
+$keepInstall = { param($e) (Test-IsAttachLinkEntry $e) -and -not (Test-IsLibraryEntry $e) }   # 安装：只删其他路径的副本
+$removeAll = { param($e) Test-IsAttachLinkEntry $e }                                         # 卸载：全删
+$third1 = '"C:\Program Files\ExcelEnhancer\ExcelEnhancer.xlam"'
+$third2 = '/R "C:\Users\u\AppData\Local\AuditCat\AttachmentManager\AuditCatAttachment.xll"'
+$optKey = Join-Path $regBase 'Options'
+
+# 「卸载后重装失败」现场：库目录副本已登记，列表里另有指向 Program Files（悬空）与早期子目录副本的登记
+Set-OpenSeq $optKey @(@('OPEN', $third1), @('OPEN1', $third2), @('OPEN2', '"AttachLink.xlam"'), @('OPEN3', ('"{0}"' -f $pfX)), @('OPEN4', '/A "C:\Old\AttachLink\AttachLink.xlam"'))
+$r = Remove-OpenEntries $optKey $keepInstall
+Check ($r.Removed -eq 2 -and -not $r.Failed) ('F 安装前清理：删掉 2 条其他路径的登记；实际 Removed=' + $r.Removed + ' Failed=' + $r.Failed)
+Check ((Get-OpenSeq $optKey) -eq ('OPEN=[{0}];OPEN1=[{1}];OPEN2=["AttachLink.xlam"]' -f $third1, $third2)) ('F 安装前清理：库目录登记保留，序列重排连续，第三方条目原值不动；实际 ' + (Get-OpenSeq $optKey))
+
+$r = Remove-OpenEntries $optKey $removeAll
+Check ($r.Removed -eq 1 -and -not $r.Failed) 'F 卸载：库目录登记一并删除'
+Check ((Get-OpenSeq $optKey) -eq ('OPEN=[{0}];OPEN1=[{1}]' -f $third1, $third2)) ('F 卸载后只剩第三方条目（引号、/R 前缀原样保留）且序列连续；实际 ' + (Get-OpenSeq $optKey))
+
+# 没有命中的条目：不改任何值名（包括原有的缺口——不删除就不重排）
+Set-OpenSeq $optKey @(@('OPEN', $third1), @('OPEN2', $third2))
+$before = Get-OpenSeq $optKey
+$r = Remove-OpenEntries $optKey $removeAll
+Check ($r.Removed -eq 0 -and -not $r.Failed -and ((Get-OpenSeq $optKey) -eq $before)) 'F 没有命中条目：不删除、不重排（原有缺口保持原样）'
+
+Set-OpenSeq $optKey @(@('OPEN', '"AttachLink.xlam"'), @('OPEN1', $third1))
+$r = Remove-OpenEntries $optKey $removeAll
+Check ($r.Removed -eq 1 -and -not $r.Failed -and ((Get-OpenSeq $optKey) -eq ('OPEN=[' + $third1 + ']'))) ('F 卸载：删首项后第三方条目前移到 OPEN；实际 ' + (Get-OpenSeq $optKey))
+
+Set-OpenSeq $optKey @(@('OPEN', ('"{0}"' -f $pfX)), @('OPEN1', '"AttachLink.xlam"'))
+$r = Remove-OpenEntries $optKey $removeAll
+Check ($r.Removed -eq 2 -and -not $r.Failed -and ((Get-OpenSeq $optKey) -eq '')) 'F 卸载：序列里只有 AttachLink 时全部删除，不留空壳'
+
+Set-OpenSeq $optKey @(@('OPEN', ('"{0}"' -f $destXlam)), @('OPEN1', '"AttachLink.xlam"'))
+$r = Remove-OpenEntries $optKey $keepInstall
+Check ($r.Removed -eq 0 -and -not $r.Failed) 'F 安装前清理：库目录副本按完整路径登记时同样保留'
+
+# Excel 实际写出的形态（2026-11-24 实测）：非库目录副本经 AddIns.Add + Installed 后，退出时写入带引号的完整路径
+Set-OpenSeq $optKey @(@('OPEN', $third1), @('OPEN1', $third2), @('OPEN2', '"C:\Tools\AttachLinkCopy\AttachLink.xlam"'))
+$r = Remove-OpenEntries $optKey $keepInstall
+Check ($r.Removed -eq 1 -and -not $r.Failed -and ((Get-OpenSeq $optKey) -eq ('OPEN=[{0}];OPEN1=[{1}]' -f $third1, $third2))) ('F 安装前清理：Excel 写出的「其他路径完整路径」登记被删除，第三方条目前移；实际 ' + (Get-OpenSeq $optKey))
+
+# Add-in Manager：值名即加载项完整路径
+$amKey = Join-Path $regBase 'Add-in Manager'
+$other = 'C:\Users\u\AppData\Local\AuditCat\AttachmentManager\active.xlam'
+New-Item -Path $amKey -Force | Out-Null
+foreach ($n in @($other, $pfX, $destXlam)) { New-ItemProperty -LiteralPath $amKey -Name $n -Value '' -PropertyType String -Force | Out-Null }
+$am = Remove-AddInManagerEntries $amKey $keepInstall
+Check ($am.Gone.Count -eq 1 -and $am.Gone[0] -eq $pfX -and -not $am.Failed) ('F Add-in Manager：安装只删其他路径的副本；实际删除 ' + ($am.Gone -join ' | '))
+Check ((((Get-Item -LiteralPath $amKey).GetValueNames() | Sort-Object) -join '|') -eq ((@($other, $destXlam) | Sort-Object) -join '|')) 'F Add-in Manager：第三方登记与库目录副本的登记保留'
+$am = Remove-AddInManagerEntries $amKey $removeAll
+Check ($am.Gone.Count -eq 1 -and $am.Gone[0] -eq $destXlam -and -not $am.Failed) 'F Add-in Manager：卸载清掉全部 AttachLink 登记'
+Check (@((Get-Item -LiteralPath $amKey).GetValueNames()).Count -eq 1 -and @((Get-Item -LiteralPath $amKey).GetValueNames())[0] -eq $other) 'F Add-in Manager：卸载后第三方登记仍在'
+$am = Remove-AddInManagerEntries (Join-Path $regBase 'NoSuchKey') $removeAll
+Check ($am.Gone.Count -eq 0 -and -not $am.Failed) 'F Add-in Manager：键不存在时什么都不做、不报错'
+
+# Clear-AddInListRegistrations：安装与卸载共用的整套清理（临时配置单元 Office\16.0\Excel 下两处登记一起放）
+$hive = Join-Path $regBase 'Office'
+function Set-Hive([object[]]$OpenPairs, [string[]]$AmNames) {
+    $o = Join-Path $hive '16.0\Excel\Options'; $a = Join-Path $hive '16.0\Excel\Add-in Manager'
+    Remove-Item $hive -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $o, $a | Out-Null
+    foreach ($pair in $OpenPairs) { New-ItemProperty -LiteralPath $o -Name $pair[0] -Value $pair[1] -PropertyType String -Force | Out-Null }
+    foreach ($n in $AmNames) { New-ItemProperty -LiteralPath $a -Name $n -Value '' -PropertyType String -Force | Out-Null }
+}
+function Get-HiveState {
+    $o = Join-Path $hive '16.0\Excel\Options'; $a = Join-Path $hive '16.0\Excel\Add-in Manager'
+    $seq = @((Get-ItemProperty -LiteralPath $o).PSObject.Properties | Where-Object { $_.Name -match '^OPEN(\d+)?$' } | Sort-Object { [int]($_.Name -replace '\D', '') } | ForEach-Object { '{0}=[{1}]' -f $_.Name, $_.Value }) -join ';'
+    return ('OPEN ' + $seq + ' | AM ' + (@((Get-Item -LiteralPath $a).GetValueNames() | Sort-Object) -join ';'))
+}
+$otherCopy = '"C:\Tools\AttachLinkCopy\AttachLink.xlam"'
+# 安装前清理（OtherPaths）：两处的其他路径登记都清掉，库目录登记与第三方条目原样保留
+Set-Hive @(@('OPEN', $third1), @('OPEN1', $otherCopy), @('OPEN2', '"AttachLink.xlam"'), @('OPEN3', $third2)) @($other, $pfX, $destXlam)
+$clean = Clear-AddInListRegistrations -Mode OtherPaths -HiveRoot $hive 3>$null 6>$null
+Check ($clean -eq $true) 'F Clear-AddInListRegistrations（安装前）：返回「清理干净」'
+$expAm = (@($destXlam, $other) | Sort-Object) -join ';'
+$expOpen = 'OPEN OPEN=[{0}];OPEN1=["AttachLink.xlam"];OPEN2=[{1}]' -f $third1, $third2
+Check ((Get-HiveState) -eq ($expOpen + ' | AM ' + $expAm)) ('F Clear-AddInListRegistrations（安装前）：两处的其他路径登记都清掉、序列重排，库目录登记与第三方条目原样保留；实际 ' + (Get-HiveState))
+# 卸载（All）：两处的 AttachLink 登记全清，第三方条目原值保留、序列连续
+Set-Hive @(@('OPEN', '"AttachLink.xlam"'), @('OPEN1', $third1), @('OPEN2', $otherCopy), @('OPEN3', $third2)) @($other, $pfX, $destXlam)
+$clean = Clear-AddInListRegistrations -Mode All -HiveRoot $hive 3>$null 6>$null
+$expOpen = 'OPEN OPEN=[{0}];OPEN1=[{1}]' -f $third1, $third2
+Check ($clean -eq $true -and ((Get-HiveState) -eq ($expOpen + ' | AM ' + $other))) ('F Clear-AddInListRegistrations（卸载）：两处的 AttachLink 登记全清，第三方条目原值保留、序列连续；实际 ' + (Get-HiveState))
+# 没有目标登记：什么都不动（包括原有的缺口），仍返回清理干净
+Set-Hive @(@('OPEN', $third1), @('OPEN2', $third2)) @($other)
+$clean = Clear-AddInListRegistrations -Mode All -HiveRoot $hive 3>$null 6>$null
+$expOpen = 'OPEN OPEN=[{0}];OPEN2=[{1}]' -f $third1, $third2
+Check ($clean -eq $true -and ((Get-HiveState) -eq ($expOpen + ' | AM ' + $other))) 'F Clear-AddInListRegistrations：没有目标登记时不删除、不重排（原有缺口保持原样）'
+
+# 删除失败不得报成功：用一个同名函数顶替 Remove-ItemProperty，让指定值名删不掉（Write-Error 遵循调用方的 -ErrorAction）
+$script:blockName = ''
+function Remove-ItemProperty {
+    [CmdletBinding()] param([string]$LiteralPath, [string[]]$Name)
+    if (@($Name) -contains $script:blockName) { Write-Error ("模拟删除失败：{0}" -f $Name); return }
+    Microsoft.PowerShell.Management\Remove-ItemProperty @PSBoundParameters
+}
+Set-Hive @(@('OPEN', $third1), @('OPEN1', '"AttachLink.xlam"')) @($other, $pfX)
+$script:blockName = $pfX
+$clean = Clear-AddInListRegistrations -Mode All -HiveRoot $hive 3>$null 6>$null
+Check ($clean -eq $false -and ((Get-Item -LiteralPath (Join-Path $hive '16.0\Excel\Add-in Manager')).GetValueNames() -contains $pfX)) 'F Clear-AddInListRegistrations：Add-in Manager 有登记删不掉 → 返回失败（安装会中止、卸载报 exit 9），终态核验看得到它'
+$script:blockName = ''
+Set-Hive @(@('OPEN', '"AttachLink.xlam"'), @('OPEN1', $third1), @('OPEN2', $otherCopy)) @()
+$script:blockName = 'OPEN'
+$r = Remove-OpenEntries (Join-Path $hive '16.0\Excel\Options') $removeAll 3>$null
+$expOpen = 'OPEN OPEN=["AttachLink.xlam"];OPEN1=[{0}]' -f $third1
+Check ($r.Failed -and ((Get-HiveState) -eq ($expOpen + ' | AM '))) ('F Remove-OpenEntries：一条删不掉、另一条已删 → 返回失败；已删的保持删除，其余条目按快照写回原名原值（序列没有被重排弄乱）；实际 ' + (Get-HiveState))
+$script:blockName = ''
+Remove-Item Function:\Remove-ItemProperty -ErrorAction SilentlyContinue
+
+# 进程存活探针：只把「进程号已不存在」判为已退出，其余查询错误向外抛（吞掉它们就会把「查不到」当成「已退出」）
+Check (Test-ProcessAlive $PID) 'F Test-ProcessAlive：自己所在的进程 → 还在'
+Check (-not (Test-ProcessAlive 999999)) 'F Test-ProcessAlive：不存在的进程号 → 已退出（不抛异常）'
+Check (@(Get-ExcelProcessIds).Count -eq @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue).Count) 'F Get-ExcelProcessIds：没有 Excel 时是空数组，有则逐个列出（与 Get-Process 一致）'
+
+# Wait-HostExit：确认不了退出就不能返回成功（卸载据此决定要不要清注册表）
+$script:fakeAlive = @{}
+$probe = { param($id) [bool]$script:fakeAlive[$id] }
+Check (Wait-HostExit @(101, 102) -TimeoutSeconds 5 -PollMilliseconds 20 -IsAlive $probe 3>$null) 'F Wait-HostExit：要等的进程都已不在 → 确认已退出'
+Check (-not (Wait-HostExit @() -TimeoutSeconds 5 -PollMilliseconds 20 -IsAlive $probe 3>$null)) 'F Wait-HostExit：没有可等的对象（没认出宿主进程）→ 不确认'
+Check (-not (Wait-HostExit $null -TimeoutSeconds 5 -PollMilliseconds 20 -IsAlive $probe 3>$null)) 'F Wait-HostExit：拿不到进程列表 → 不确认'
+Check (Wait-HostExit @(999999) -TimeoutSeconds 5 -PollMilliseconds 20 3>$null) 'F Wait-HostExit：默认探针——进程号已不存在 → 确认已退出'
+$script:fakeAlive = @{ 101 = $true }
+$sw = [Diagnostics.Stopwatch]::StartNew()
+Check (-not (Wait-HostExit @(102, 101) -TimeoutSeconds 1 -PollMilliseconds 20 -IsAlive $probe 3>$null)) 'F Wait-HostExit：有进程到时没退出 → 不确认'
+Check ($sw.Elapsed.TotalSeconds -ge 0.9) 'F Wait-HostExit：不确认是因为真的等到了超时'
+Check (-not (Wait-HostExit @(101) -TimeoutSeconds 5 -PollMilliseconds 20 -IsAlive { param($id) throw '查询出错' } 3>$null)) 'F Wait-HostExit：查询是否存活时出错 → 不确认（fail-closed）'
+$script:probeCalls = 0
+$probeCounting = { param($id) $script:probeCalls++; ($script:probeCalls -le 2) }
+Check (Wait-HostExit @(101) -TimeoutSeconds 5 -PollMilliseconds 20 -IsAlive $probeCounting 3>$null) 'F Wait-HostExit：前两次查询还在、第三次已退出 → 确认'
+Check ($script:probeCalls -eq 3) ('F Wait-HostExit：「随后退出」确实经历了多次轮询；实际查询 ' + $script:probeCalls + ' 次')
+
+# Get-NewExcelProcessIds：相对快照做差集；没有快照 / 枚举失败时返回 $null（做不了差集，不能当成「没有新进程」）
+$script:fakeIds = [pscustomobject]@{ Calls = 1; Before = @(1); After = @(1, 2); Throw = $false; ThrowAfterFirst = $false }
+Add-Member -InputObject $script:fakeIds ScriptMethod Next {
+    # 第 1 次调用（创建前的快照）返回 Before，之后返回 After；Throw / ThrowAfterFirst 模拟枚举失败
+    $this.Calls++
+    if ($this.Throw -or ($this.ThrowAfterFirst -and $this.Calls -gt 1)) { throw '枚举失败' }
+    if ($this.Calls -eq 1) { return $this.Before }
+    return $this.After
+} -Force
+$getIds = { $script:fakeIds.Next() }
+$script:fakeIds.Calls = 1          # 下一次调用相当于「创建实例之后」的那一次
+$n = Get-NewExcelProcessIds @(1) $getIds 3>$null
+Check ($null -ne $n -and $n.Count -eq 1 -and $n[0] -eq 2) 'F Get-NewExcelProcessIds：返回相对快照新出现的进程号'
+$script:fakeIds.Calls = 1
+$n = Get-NewExcelProcessIds @(1, 2) $getIds 3>$null
+Check ($null -ne $n -and $n.Count -eq 0) 'F Get-NewExcelProcessIds：没有新进程时是空数组（不是 $null）'
+$script:fakeIds.Calls = 1
+Check ($null -eq (Get-NewExcelProcessIds $null $getIds 3>$null)) 'F Get-NewExcelProcessIds：没有创建前的快照 → $null'
+$script:fakeIds.Calls = 1
+$script:fakeIds.ThrowAfterFirst = $true
+Check ($null -eq (Get-NewExcelProcessIds @(1) $getIds 3>$null)) 'F Get-NewExcelProcessIds：枚举失败 → $null（不能当成「没有新进程」）'
+
+# Invoke-AddInUnregister（卸载第 1 步）：何时算「确认实例已退出」——只有两种情况为真，见函数注释
+function New-FakeAddInList {
+    $entry = [pscustomobject]@{ Installed = $true }
+    $c = [pscustomobject]@{}
+    Add-Member -InputObject $c NoteProperty Entry $entry -Force
+    Add-Member -InputObject $c ScriptMethod Item { param($n) return $this.Entry } -Force
+    return $c
+}
+function New-FakeExcelApp($Ains) {
+    $a = [pscustomobject]@{}
+    Add-Member -InputObject $a NoteProperty Ains $Ains -Force
+    Add-Member -InputObject $a ScriptProperty AddIns { $this.Ains } -Force
+    Add-Member -InputObject $a ScriptMethod Quit { $script:fakeQuit++ } -Force
+    return $a
+}
+function Reset-UnregisterFixture([int[]]$Before, [int[]]$After) {
+    $script:fakeIds.Calls = 0; $script:fakeIds.Before = $Before; $script:fakeIds.After = $After
+    $script:fakeIds.Throw = $false; $script:fakeIds.ThrowAfterFirst = $false
+    $script:fakeAlive = @{}; $script:fakeQuit = 0
+}
+function Invoke-FakeUnregister([string]$Mode) {
+    # 注意：局部变量不要叫 $create——PowerShell 变量名不分大小写，会和 [string]$Create 参数当成同一个而把脚本块转成字符串
+    $make = { New-FakeExcelApp $ains }
+    if ($Mode -eq 'throw') { $make = { throw '按 CLSID 激活得到的仍不是 Microsoft Excel' } }
+    return (Invoke-AddInUnregister -CreateExcel $make -GetExcelIds $getIds -IsAlive $probe -TimeoutSeconds 1 -PollMilliseconds 20 3>$null)
+}
+Reset-UnregisterFixture @(1) @(1, 2)
+$ains = New-FakeAddInList
+$r = Invoke-FakeUnregister 'ok'
+Check ($r.Unregistered -and $r.ExitConfirmed -and -not $r.Error) 'F 卸载第 1 步：取得实例 → 注销 → 实例已退出 → 已注销、确认退出'
+Check ($ains.Entry.Installed -eq $false -and $script:fakeQuit -eq 1 -and $script:fakeIds.Calls -eq 2) 'F 卸载第 1 步：确实置了 Installed=False、调了 Quit，并用创建前后的两次进程列表做了差集'
+Reset-UnregisterFixture @(1) @(1, 2)
+$script:fakeAlive = @{ 2 = $true }
+$r = Invoke-FakeUnregister 'ok'
+Check ($r.Unregistered -and -not $r.ExitConfirmed) 'F 卸载第 1 步：取得实例并注销了，但创建期间出现的进程没退出 → 不确认'
+Reset-UnregisterFixture @(1) @(1, 3)
+$script:fakeAlive = @{ 3 = $true }
+$r = Invoke-FakeUnregister 'throw'
+Check (-not $r.Unregistered -and -not $r.ExitConfirmed -and $r.Error -like '*不是 Microsoft Excel*') 'F 卸载第 1 步：创建实例之后才失败、那个进程没退出 → 不确认（不能当成「没拉起 Excel」）'
+Reset-UnregisterFixture @(1) @(1, 4)
+$r = Invoke-FakeUnregister 'throw'
+Check (-not $r.Unregistered -and $r.ExitConfirmed) 'F 卸载第 1 步：创建之后才失败，但那个进程随后退出 → 确认'
+Reset-UnregisterFixture @(1) @(1)
+$r = Invoke-FakeUnregister 'throw'
+Check (-not $r.Unregistered -and $r.ExitConfirmed) 'F 卸载第 1 步：失败且创建期间没有新的 EXCEL 进程（本机没有 Excel / 落到了 WPS）→ 确认'
+Reset-UnregisterFixture @() @()
+$script:fakeIds.Throw = $true
+$ains = New-FakeAddInList
+$r = Invoke-FakeUnregister 'ok'
+Check ($r.Unregistered -and -not $r.ExitConfirmed) 'F 卸载第 1 步：创建前枚举不到进程（做不了差集）→ 注销照做，但不确认'
+Reset-UnregisterFixture @(1) @(1, 2)
+$script:fakeIds.ThrowAfterFirst = $true
+$ains = New-FakeAddInList
+$r = Invoke-FakeUnregister 'ok'
+Check ($r.Unregistered -and -not $r.ExitConfirmed) 'F 卸载第 1 步：创建后枚举不到进程（认不出该等谁）→ 注销照做，但不确认'
+Reset-UnregisterFixture @() @()
+$script:fakeIds.Throw = $true
+$r = Invoke-FakeUnregister 'throw'
+Check (-not $r.Unregistered -and -not $r.ExitConfirmed) 'F 卸载第 1 步：既没取得实例、又枚举不到进程 → 不确认'
+
+# 「禁用的项目」二进制值：按完整文件名匹配（值内是 UTF-16 文本：12 字节头 + 路径 + NUL [+ ProgID + NUL]）
+function New-DisabledBlob([string[]]$Parts) {
+    $ms = New-Object System.IO.MemoryStream
+    $ms.Write([byte[]](1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), 0, 12)
+    foreach ($s in $Parts) { $b = [Text.Encoding]::Unicode.GetBytes($s + [char]0); $ms.Write($b, 0, $b.Length) }
+    return $ms.ToArray()
+}
+Check (Test-DisabledItemsBlob (New-DisabledBlob @('c:\users\u\appdata\roaming\microsoft\addins\attachlink.xlam'))) 'F 禁用项目：列有 AttachLink.xlam → 识别'
+Check (Test-DisabledItemsBlob (New-DisabledBlob @('c:\program files\attachlink\attachlink.xlam', 'attachlink.connect'))) 'F 禁用项目：路径后面还跟着 ProgID 也识别'
+Check (-not (Test-DisabledItemsBlob (New-DisabledBlob @('c:\users\u\appdata\roaming\microsoft\addins\attachlinkshim.dll', 'attachlinkshim.connect')))) 'F 禁用项目：引导器 AttachLinkShim.dll 的旧记录不算'
+Check (-not (Test-DisabledItemsBlob (New-DisabledBlob @('c:\x\myattachlink.xlam')))) 'F 禁用项目：前缀相近的文件名不算'
+Check (-not (Test-DisabledItemsBlob (New-DisabledBlob @('c:\x\attachlink.xlam.bak')))) 'F 禁用项目：后缀相近的文件名不算'
+Check (-not (Test-DisabledItemsBlob ([byte[]]@())) -and -not (Test-DisabledItemsBlob $null)) 'F 禁用项目：空值 / 空引用不算'
+
+$hint = Get-DisabledItemsHint
+Check ($hint -is [string]) 'F Get-DisabledItemsHint：读取「禁用的项目」不抛异常，返回字符串'
+Remove-Item $regBase -Recurse -Force -ErrorAction SilentlyContinue
+
+# ---------------------------------------------------------------------
 # 公共：被测看门狗（独立日志）与真实 Excel 实例
 $trusted = $XlamPath
 if (-not (Test-Path $trusted)) { $trusted = Join-Path $env:APPDATA 'Microsoft\AddIns\AttachLink.xlam' }
@@ -264,8 +531,20 @@ function Start-TestWatchdog([string]$Log) {
     return (Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $Log), '-XlamPath', ('"{0}"' -f $trusted)) -PassThru -WindowStyle Hidden)
 }
 function Get-WdLogLines([string]$Log) {
-    if (Test-Path $Log) { return @([IO.File]::ReadAllLines($Log, [Text.Encoding]::UTF8)) }
-    return @()
+    # 用「允许读写共享」的方式读：被测看门狗正往日志追加的那一瞬间，按只读共享打开会撞上
+    #「文件正在被另一进程使用」（2026-11-24 实测偶发，ReadAllLines 即如此）；仍读不到就按空处理，下个周期再读
+    if (-not (Test-Path $Log)) { return @() }
+    $fs = $null; $sr = $null
+    try {
+        $fs = [IO.File]::Open($Log, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        $sr = New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8)
+        $text = $sr.ReadToEnd()
+        # 末尾没有换行的最后一个分段是看门狗还没写完的半行，丢弃
+        if ($text.Length -gt 0 -and -not $text.EndsWith("`n")) { $text = $text.Substring(0, $text.LastIndexOf("`n") + 1) }
+        return @($text -split "`r?`n" | Where-Object { $_.Length -gt 0 })
+    } catch { return @() } finally {
+        if ($sr) { $sr.Close() } elseif ($fs) { $fs.Close() }
+    }
 }
 function Wait-LogLine([string]$Log, [string]$Pattern, [int]$Seconds) {
     # 等到日志里出现匹配的行数（0 = 超时）
@@ -516,4 +795,5 @@ if ($deployedDiffers) {
 
 '--- 清理 ---'
 try { Remove-Item $base -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+try { Remove-Item $regBase -Recurse -Force -ErrorAction SilentlyContinue } catch {}
 "RESULT: " + $(if ($ok) { 'PASS' } else { 'FAIL' })

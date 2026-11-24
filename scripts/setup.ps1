@@ -94,7 +94,7 @@ else {
     if ($userExit -eq 9) {
         # oracle 三轮：子脚本「加载项列表清理未完全成功」需原样传播（GUI 退出码承诺 9），不得被 throw 吞成 1
         $userLevelOpenFail = $true
-        Write-Host '注意：用户级卸载的加载项列表 OPEN 清理未完全成功（见上方警告），继续机器级检查。'
+        Write-Host '注意：用户级卸载的加载项列表（OPEN / Add-in Manager）登记未能完全清理（见上方警告），继续机器级检查。'
     }
     elseif ($userExit -ne 0) { throw '用户级卸载失败，请把上方错误信息反馈给分发人。' }
     Write-Host ''
@@ -168,7 +168,7 @@ else {
         exit 8
     }
     if ($userLevelOpenFail) {
-        Write-Host '结果：机器级已卸载，但用户级加载项列表 OPEN 清理未完全成功（见上方警告）。'
+        Write-Host '结果：机器级已卸载，但用户级加载项列表（OPEN / Add-in Manager）登记未能完全清理（见上方警告）。'
         exit 9
     }
     if ($liveXl) {
