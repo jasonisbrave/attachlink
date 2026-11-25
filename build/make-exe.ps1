@@ -27,6 +27,7 @@ Copy-Item $distXlam "$stage\dist\AttachLink.xlam" -Force
 Copy-Item (Join-Path $root 'scripts\setup.ps1')            "$stage\scripts\" -Force
 Copy-Item (Join-Path $root 'scripts\watchdog.ps1')         "$stage\scripts\" -Force
 Copy-Item (Join-Path $root 'scripts\watchdog_launcher.vbs') "$stage\scripts\" -Force
+Copy-Item (Join-Path $root 'scripts\healthcheck.ps1')       "$stage\scripts\" -Force
 Copy-Item (Join-Path $root 'build\install.ps1')            "$stage\build\" -Force
 Copy-Item (Join-Path $root 'build\install-elevated.ps1')   "$stage\build\" -Force
 Copy-Item (Join-Path $root 'packaging\run-elevated.ps1')      "$stage\" -Force
@@ -34,32 +35,38 @@ Copy-Item (Join-Path $root 'packaging\elevated-capture.ps1') "$stage\" -Force
 [IO.File]::WriteAllText("$stage\VERSION.txt", $ver, [Text.UTF8Encoding]::new($false))
 Write-Host "payload 就绪：$stage"
 
-# pyinstaller（CLI 直调，免维护 spec 文件；--add-data 的 Windows 分隔符为分号）
+# pyinstaller（CLI 直调，免维护 spec 文件；--add-data 的 Windows 分隔符为分号；spec 定向到专用临时目录，不落到仓库根/CWD）
 $work = Join-Path $root 'build\exe-build'
 $out  = Join-Path $root 'build\exe-dist'
+$specDir = Join-Path $env:TEMP 'AttachLink_exe_spec'
 $releaseDir = Join-Path $root "release\AttachLink-$ver"
 if (Test-Path $work)  { Remove-Item $work -Recurse -Force }
 if (Test-Path $out)   { Remove-Item $out -Recurse -Force }
+if (Test-Path $specDir) { Remove-Item $specDir -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $specDir | Out-Null
 $addData = @(
     , @("$stage\VERSION.txt", "payload")
     , @("$stage\dist\AttachLink.xlam", "payload\dist")
     , @("$stage\scripts\setup.ps1", "payload\scripts")
     , @("$stage\scripts\watchdog.ps1", "payload\scripts")
     , @("$stage\scripts\watchdog_launcher.vbs", "payload\scripts")
+    , @("$stage\scripts\healthcheck.ps1", "payload\scripts")
     , @("$stage\build\install.ps1", "payload\build")
     , @("$stage\build\install-elevated.ps1", "payload\build")
     , @("$stage\run-elevated.ps1", "payload")
     , @("$stage\elevated-capture.ps1", "payload")
 )
 $argList = @('-m', 'PyInstaller', '--noconfirm', '--clean', "--workpath", $work, "--distpath", $out,
+    '--specpath', $specDir,
     '--onefile', '--noconsole', '--name', 'AttachLinkSetup')
 foreach ($ad in $addData) { $argList += @('--add-data', "$($ad[0]);$($ad[1])") }
 $argList += (Join-Path $root 'packaging\setup_gui.py')
 & python @argList
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller 构建失败' }
-# pyinstaller 会把自动生成的 spec 写到当前目录（仓库根），用后即删
-$straySpec = 'D:\Code\Projects\AttachLinkSetup.spec'
-if (Test-Path $straySpec) { Remove-Item $straySpec -Force }
+# spec 已定向到专用临时目录（$specDir），仓库根与 CWD 不应再有 AttachLinkSetup.spec——残留即告警
+foreach ($straySpec in @((Join-Path $root 'AttachLinkSetup.spec'), (Join-Path ([string](Get-Location)) 'AttachLinkSetup.spec'))) {
+    if ($straySpec -and (Test-Path $straySpec)) { Write-Warning "发现残留 spec：$straySpec"; Remove-Item $straySpec -Force }
+}
 
 # 发布目录：exe + README（最终交付 zip 即此目录打包）
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null

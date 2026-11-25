@@ -1,5 +1,6 @@
 ﻿# =====================================================================
 # AttachLink v1.2.0 功能测试：文件夹引用 / 菜单二级化 / 文件夹行体检
+# + 修复批 V1：同名文件夹绝不覆盖（复用 / 整夹另存 名(2) 五场景）
 # 用法：powershell -ExecutionPolicy Bypass -File test-folder.ps1
 # 注意：含中文，必须 UTF-8 with BOM。
 # =====================================================================
@@ -150,6 +151,55 @@ Check ($r1 -like '失败：*根目录*')                                        
 $r2 = $xl.Run('AttachLink_InsertFolderCore', $attDir)
 Check (($r2 -like '失败：*源文件夹内部*') -or ($r2 -like '失败：*已位于*'))  '拒绝附件夹内自引用（命中源内/自引防护）'
 try { $wb2.Close($false) } catch {}
+
+'--- 6) V1：同名文件夹绝不覆盖——逐文件三方比对，全一致复用、否则整夹另存 名(2) ---'
+# 组 3 曾篡改 2023\发票.pdf——先恢复副本与源一致，场景②才有「全一致复用」前提
+Set-Content "$attDir\合同扫描件\2023\发票.pdf" -Value 'invoice-2023'
+# ② 源未变再次引用 → 直接复用、不复制
+$s6b = [string]$xl.Run('AttachLink_InsertFolderCore', $srcRoot)
+"    $($s6b -replace "`r`n", ' | ')"
+Check ($s6b -like '*已直接复用*')                                       'V1-②: 内容一致直接复用'
+Check (-not (Test-Path "$attDir\合同扫描件(2)"))                          'V1-②: 未产生 (2) 副本'
+Check ($s6b -like ('*链接指向*' + $attach + '*合同扫描件*'))                  'V1-②: 汇总含链接指向现有副本'
+# ③ 副本内某文件被用户改过 → 整夹另存，原副本字节不变
+Set-Content "$attDir\合同扫描件\购销合同.pdf" -Value 'contract-A-USER-EDITED'
+$hCopyBefore = (Get-FileHash "$attDir\合同扫描件\购销合同.pdf" -Algorithm SHA256).Hash
+$s6c = [string]$xl.Run('AttachLink_InsertFolderCore', $srcRoot)
+"    $($s6c -replace "`r`n", ' | ')"
+Check ((Get-FileHash "$attDir\合同扫描件\购销合同.pdf" -Algorithm SHA256).Hash -eq $hCopyBefore) 'V1-③: 原副本字节不变（未被覆盖）'
+Check (Test-Path "$attDir\合同扫描件(2)\购销合同.pdf")                      'V1-③: 出现 名(2)'
+Check ((Get-FileHash "$attDir\合同扫描件(2)\购销合同.pdf" -Algorithm SHA256).Hash -eq (Get-FileHash "$srcRoot\购销合同.pdf" -Algorithm SHA256).Hash) 'V1-③: (2) 内容=源'
+Check ($s6c -like '*未覆盖*' -and $s6c -like '*已另存为*合同扫描件(2)*')     'V1-③: 汇总明示未覆盖/已另存 名(2)'
+$bl6c = Get-Content $baseline -Encoding UTF8
+Check (($bl6c -match [regex]::Escape('合同扫描件(2)\购销合同.pdf')).Count -ge 1) 'V1-③: (2) 有自己的基线'
+Check (($bl6c -match [regex]::Escape('合同扫描件\2023\发票.pdf')).Count -ge 1) 'V1-③: 旧键保留不被改写'
+# ④ 副本与基线不一致但源==副本内容 → 仍另存（三方一致规则：copy==baseline==source）
+$srcB = "$base\srcB\资料"
+New-Item -ItemType Directory -Force -Path $srcB | Out-Null
+Set-Content "$srcB\b1.pdf" -Value 'B1'
+$s6d1 = [string]$xl.Run('AttachLink_InsertFolderCore', $srcB)             # 首次引用：复制+登记
+Check ($s6d1 -like '*已复制到*')                                          'V1-④: 首次引用已复制'
+Set-Content "$attDir\资料\b1.pdf" -Value 'B2'                              # 副本被改动（基线仍 B1）
+Set-Content "$srcB\b1.pdf" -Value 'B2'                                     # 源同步为 B2（源==副本≠基线）
+$s6d2 = [string]$xl.Run('AttachLink_InsertFolderCore', $srcB)
+"    $($s6d2 -replace "`r`n", ' | ')"
+Check (Test-Path "$attDir\资料(2)\b1.pdf")                                  'V1-④: 基线不符仍另存 名(2)'
+Check ((Get-FileHash "$attDir\资料\b1.pdf" -Algorithm SHA256).Hash -eq (Get-FileHash "$srcB\b1.pdf" -Algorithm SHA256).Hash) 'V1-④: 原副本未被覆盖（仍=改动后内容 B2）'
+# ⑤ 源新增文件 → 另存
+$srcC = "$base\srcC\手册"
+New-Item -ItemType Directory -Force -Path $srcC | Out-Null
+Set-Content "$srcC\h1.pdf" -Value 'H1'
+$null = $xl.Run('AttachLink_InsertFolderCore', $srcC)
+Set-Content "$srcC\h2.pdf" -Value 'H2'                                     # 源多了 h2.pdf
+$s6e = [string]$xl.Run('AttachLink_InsertFolderCore', $srcC)
+Check (Test-Path "$attDir\手册(2)\h2.pdf")                                  'V1-⑤: 源新增文件 → 另存 名(2)'
+# 同名路径其实是文件 → 整夹另存
+$srcD = "$base\srcD\单文件占用"
+New-Item -ItemType Directory -Force -Path $srcD | Out-Null
+Set-Content "$srcD\d1.pdf" -Value 'D1'
+Set-Content "$attDir\单文件占用" -Value 'iam-a-file'                       # 同名路径被文件占用
+$s6f = [string]$xl.Run('AttachLink_InsertFolderCore', $srcD)
+Check (Test-Path "$attDir\单文件占用(2)\d1.pdf")                            'V1-⑥: 同名路径是文件 → 另存 名(2)'
 
 try { foreach ($w in @($xl.Workbooks)) { $w.Saved = $true }; $xl.Quit() } catch {}
 Start-Sleep 2

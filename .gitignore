@@ -19,3 +19,9 @@ AttachLinkSetup.spec
 # 含其安装脚本与 VBA 逻辑剖析，交涉用途；公开仓库不宜发布第三方产品逆向细节。
 # 需要交给所里开发人员时走本地文件/私有渠道传递。
 docs/AuditCat附件管理-鼎信诺兼容性分析与修复建议.md
+
+# 预研材料仅限本地、不入库（2026-11-25 用户决定）
+docs/
+scripts/research/
+scripts/loader-prototype.ps1
+scripts/test-loader-prototype.ps1

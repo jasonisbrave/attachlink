@@ -310,6 +310,36 @@ function Test-ProcessAlive([int]$Id) {
         throw
     }
 }
+function Test-ProcessLive([int]$Id) {
+    # 进程是否「存活」：存在且不是墓碑残影（WorkingSet64 趋零的已退出残影不算存活）。
+    # 查询错误原样抛出——把「查不到」当成「已退出」会误判 ExitConfirmed。
+    try {
+        $p = [System.Diagnostics.Process]::GetProcessById($Id)
+        return ($p.WorkingSet64 -gt 1MB)
+    } catch {
+        $ex = $_.Exception
+        while ($ex.InnerException) { $ex = $ex.InnerException }
+        if ($ex -is [ArgumentException]) { return $false }
+        throw
+    }
+}
+function Get-BlockingExcelProcessIds {
+    # 当前存活的 EXCEL 进程号（WorkingSet64 > 1MB，过滤已退出但被句柄持有的墓碑残影）。
+    # 卸载预检（setup.ps1）与卸载收尾核验共用。
+    return @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue |
+        Where-Object { $_.WorkingSet64 -gt 1MB } | ForEach-Object { $_.Id })
+}
+function Test-AddInFileLocked([string]$Path) {
+    # 加载项文件是否被占用：以「拒绝一切共享」的方式尝试打开——共享冲突或其它 IO 异常都算占用；
+    # 文件不存在则不算占用（没有可删的东西）。卸载预检用：被占用时卸载删不掉文件，且占用方退出时
+    # 可能把内存里的加载项登记写回注册表，造成「卸载完成」的假象。
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        $fs.Close()
+        return $false
+    } catch { return $true }
+}
 function Wait-HostExit([int[]]$ProcIds, [int]$TimeoutSeconds = 15, [int]$PollMilliseconds = 200, [scriptblock]$IsAlive = { param($id) Test-ProcessAlive $id }) {
     # 等这些实例真正退出：Excel 到退出时才把加载项列表（OPENn / Add-in Manager）落盘，早于它清理注册表会被
     # 它的落盘覆盖回去。
@@ -347,7 +377,7 @@ function Get-NewExcelProcessIds([int[]]$Before, [scriptblock]$GetExcelIds = { Ge
     }
     return ,@($ids | Where-Object { $Before -notcontains $_ })
 }
-function Invoke-AddInUnregister([scriptblock]$CreateExcel = { New-RealExcel }, [scriptblock]$GetExcelIds = { Get-ExcelProcessIds }, [scriptblock]$IsAlive = { param($id) Test-ProcessAlive $id }, [int]$TimeoutSeconds = 15, [int]$PollMilliseconds = 200) {
+function Invoke-AddInUnregister([scriptblock]$CreateExcel = { New-RealExcel }, [scriptblock]$GetExcelIds = { Get-ExcelProcessIds }, [scriptblock]$IsAlive = { param($id) Test-ProcessAlive $id }, [scriptblock]$IsLive = { param($id) Test-ProcessLive $id }, [int]$TimeoutSeconds = 15, [int]$PollMilliseconds = 200) {
     # 卸载第 1 步：让一个 Excel 实例把 AttachLink 置为 Installed=False，然后确认相关实例都已退出。
     # 返回 @{ Unregistered = 是否真的执行了注销; ExitConfirmed = 是否确认实例已退出（可以接着清注册表）; Error = 失败原因 }
     #
@@ -390,6 +420,25 @@ function Invoke-AddInUnregister([scriptblock]$CreateExcel = { New-RealExcel }, [
             $confirmed = Wait-HostExit $new -TimeoutSeconds $TimeoutSeconds -PollMilliseconds $PollMilliseconds -IsAlive $IsAlive
         }
     }
+    # council C2：原有确认只等「创建期间新出现」的 PID——卸载开始前就已存在的 Excel 若仍在运行，
+    # 它退出时会把内存里的加载项登记写回注册表，抢在其后清理会被覆盖回去（「卸载干净」假象）。
+    # 因此 $before 里任何 PID 仍然存活（或存活状态无法确认）都不能确认退出。
+    if ($confirmed -and $null -ne $before -and @($before).Count -gt 0) {
+        try {
+            $stale = @($before | Where-Object { [bool](& $IsLive $_) })
+        } catch {
+            Write-Warning ("无法确认卸载开始前已存在的 Excel 是否仍在运行：{0}" -f $_.Exception.Message)
+            $stale = $null
+        }
+        if ($null -eq $stale) {
+            $confirmed = $false
+        } elseif ($stale.Count -gt 0) {
+            $confirmed = $false
+            $msg = ('卸载开始前就已打开的 Excel（pid ' + ($stale -join '、') + '）仍在运行，请关闭后重试')
+            Write-Warning $msg
+            if ($errorText) { $errorText += '；' + $msg } else { $errorText = $msg }
+        }
+    }
     return @{ Unregistered = [bool]$unregistered; ExitConfirmed = [bool]$confirmed; Error = $errorText }
 }
 function Test-DisabledItemsBlob([byte[]]$bytes) {
@@ -416,6 +465,53 @@ function Get-DisabledItemsHint {
         } catch { }
     }
     return ''
+}
+function Get-UninstallResidue([bool]$ListCleaned, [string]$XlamPath = $destXlam, [string]$LegacyDir = $legacySub,
+    [string]$HiveRoot = 'HKCU:\Software\Microsoft\Office', [string[]]$OfficeVers = $officeVersions,
+    [string[]]$ComShimKeys = @(
+        'HKCU:\Software\Microsoft\Office\Excel\Addins\AttachLinkShim.Connect',
+        'HKCU:\Software\Microsoft\Office\Excel\AddinsData\AttachLinkShim.Connect',
+        'HKCU:\Software\Classes\AttachLinkShim.Connect',
+        'HKCU:\Software\Classes\CLSID\{D4F8A1C2-93B7-4E5A-8C6D-2F1E9B7A4C58}'
+    ),
+    [scriptblock]$GetLiveExcel = { Get-BlockingExcelProcessIds }) {
+    # 卸载收尾核验（council C1/C4）：删除动作全部做完之后按事实收集残留清单，每条形如
+    # 「名称：路径（原因 / 处置）」。返回空数组 = 全部干净；有任何一行 = 卸载未完全成功（exit 10）。
+    # 全部判定可注入（临时文件 / 临时注册表键 / 假 scriptblock），便于单元测试。
+    $residue = @()
+    if (Test-Path -LiteralPath $XlamPath) {
+        $residue += "加载项副本：$XlamPath（文件未能删除，可能被 Excel / WPS 表格或其它程序占用；处置：关闭全部 Excel 后重新运行卸载）"
+    }
+    if (Test-Path -LiteralPath $LegacyDir) {
+        $residue += "旧子目录：$LegacyDir（目录未能删除；处置：关闭全部 Excel 后重新运行卸载，仍失败请手动删除该目录）"
+    }
+    # 受信任位置：卸载的清理范围覆盖安装分支可能写过的所有键（16.0 / 15.0 / 14.0 × Security 与 Trust Center 两处）
+    foreach ($v in @($OfficeVers)) {
+        foreach ($sub in @('Security\Trusted Locations\AttachLink', 'Trust Center\Trusted Locations\AttachLink')) {
+            $k = Join-Path $HiveRoot "$v\Excel\$sub"
+            if (Test-Path -LiteralPath $k) {
+                $residue += "受信任位置登记：$k（注册表键未能删除；处置：请手动删除该键）"
+            }
+        }
+    }
+    # 旧 COM 引导器（路线已废弃）：现有清理清单 + AddinsData 缓存键（本机实存 LoadCount=10）+ AddIns 目录下的 DLL
+    foreach ($k in @($ComShimKeys)) {
+        if (Test-Path -LiteralPath $k) {
+            $residue += "旧 COM 引导器登记：$k（注册表键未能删除；处置：请手动删除该键）"
+        }
+    }
+    $shimDll = Join-Path (Split-Path -Parent $XlamPath) 'AttachLinkShim.dll'
+    if (Test-Path -LiteralPath $shimDll) {
+        $residue += "旧 COM 引导器文件：$shimDll（文件未能删除；处置：请手动删除该文件）"
+    }
+    if (-not $ListCleaned) {
+        $residue += '加载项列表登记：Options\OPENn 或 Add-in Manager 仍有 AttachLink 登记未能清理（见上方警告；处置：请在 Excel「选项-加载项」中手动移除，或关闭所有 Excel 后重新运行卸载）'
+    }
+    $live = @(& $GetLiveExcel)
+    if ($live.Count -gt 0) {
+        $residue += ('仍有存活的 Excel（pid ' + ($live -join '、') + '）：卸载期间启动的会话退出时可能把加载项登记写回注册表（处置：关闭全部 Excel 后重新运行卸载）')
+    }
+    return $residue
 }
 
 if (-not $Uninstall) {
@@ -573,17 +669,34 @@ else {
         }
     }
     Remove-Item $legacySub -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item $tl -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item $tlBad -Recurse -Force -ErrorAction SilentlyContinue
+    # 受信任位置：遍历全部 Office 版本、两处可能写过的路径，逐个删、逐个核验（核验见 Get-UninstallResidue）
+    foreach ($v in $officeVersions) {
+        foreach ($k in @(
+            "HKCU:\Software\Microsoft\Office\$v\Excel\Security\Trusted Locations\AttachLink",
+            "HKCU:\Software\Microsoft\Office\$v\Excel\Trust Center\Trusted Locations\AttachLink"
+        )) { Remove-Item $k -Recurse -Force -ErrorAction SilentlyContinue }
+    }
     # 清理 COM 引导器
     Remove-Item 'HKCU:\Software\Microsoft\Office\Excel\Addins\AttachLinkShim.Connect' -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item 'HKCU:\Software\Microsoft\Office\Excel\AddinsData\AttachLinkShim.Connect' -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item 'HKCU:\Software\Classes\AttachLinkShim.Connect' -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item 'HKCU:\Software\Classes\CLSID\{D4F8A1C2-93B7-4E5A-8C6D-2F1E9B7A4C58}' -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $addInsDir 'AttachLinkShim.dll') -Force -ErrorAction SilentlyContinue
+
+    # ---- 3. 按事实核验：有残留就如实报「未完全成功」（exit 10），全部干净才说卸载完成 ----
+    $residue = @(Get-UninstallResidue -ListCleaned $listCleaned)
+    $listResidue = @($residue | Where-Object { $_ -like '加载项列表登记*' })
+    $otherResidue = @($residue | Where-Object { $_ -notlike '加载项列表登记*' })
+    if ($otherResidue.Count -gt 0) {
+        Write-Host '⚠ 卸载未完全成功，以下项目未能清除：'
+        foreach ($r in $residue) { Write-Host ('  - ' + $r) }
+        Write-Host '请关闭所有 Excel（含鼎信诺、WPS 表格）后重新运行卸载；仍失败则按上方清单手动处理。'
+        exit 10
+    }
     if (-not $listCleaned) {
-        Write-Host '卸载完成（文件与注册表其余清理已执行），但加载项列表（OPEN / Add-in Manager）登记未能完全清理（见上方警告）。'
+        Write-Host '卸载完成（文件与注册表其余清理已执行且核验无残留），但加载项列表（OPEN / Add-in Manager）登记未能完全清理（见上方警告）。'
         exit 9
     }
-    Write-Host '卸载完成（含加载项列表 OPEN/OPENn 残留清理、序列重排与 Add-in Manager 登记清理）。'
+    Write-Host '卸载完成（含加载项列表 OPEN/OPENn 残留清理、序列重排与 Add-in Manager 登记清理，副本 / 受信任位置 / 旧引导器残留均已核验清除）。'
     Write-Host '若曾在其他路径手动加载过本加载项副本，可在 Excel「选项-加载项-管理: Excel 加载项-转到」中手动移除。'
 }

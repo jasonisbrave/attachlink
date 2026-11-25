@@ -463,14 +463,16 @@ function New-FakeExcelApp($Ains) {
 function Reset-UnregisterFixture([int[]]$Before, [int[]]$After) {
     $script:fakeIds.Calls = 0; $script:fakeIds.Before = $Before; $script:fakeIds.After = $After
     $script:fakeIds.Throw = $false; $script:fakeIds.ThrowAfterFirst = $false
-    $script:fakeAlive = @{}; $script:fakeQuit = 0
+    $script:fakeAlive = @{}; $script:fakeQuit = 0; $script:fakeLive = @{}
 }
 function Invoke-FakeUnregister([string]$Mode) {
     # 注意：局部变量不要叫 $create——PowerShell 变量名不分大小写，会和 [string]$Create 参数当成同一个而把脚本块转成字符串
     $make = { New-FakeExcelApp $ains }
     if ($Mode -eq 'throw') { $make = { throw '按 CLSID 激活得到的仍不是 Microsoft Excel' } }
-    return (Invoke-AddInUnregister -CreateExcel $make -GetExcelIds $getIds -IsAlive $probe -TimeoutSeconds 1 -PollMilliseconds 20 3>$null)
+    # $probe 供 Wait-HostExit（进程是否已退出）；$liveProbe 供 council C2 的「卸载前已存在进程是否仍存活」判定
+    return (Invoke-AddInUnregister -CreateExcel $make -GetExcelIds $getIds -IsAlive $probe -IsLive $liveProbe -TimeoutSeconds 1 -PollMilliseconds 20 3>$null)
 }
+$liveProbe = { param($id) [bool]$script:fakeLive[$id] }
 Reset-UnregisterFixture @(1) @(1, 2)
 $ains = New-FakeAddInList
 $r = Invoke-FakeUnregister 'ok'
@@ -522,6 +524,128 @@ Check (-not (Test-DisabledItemsBlob ([byte[]]@())) -and -not (Test-DisabledItems
 $hint = Get-DisabledItemsHint
 Check ($hint -is [string]) 'F Get-DisabledItemsHint：读取「禁用的项目」不抛异常，返回字符串'
 Remove-Item $regBase -Recurse -Force -ErrorAction SilentlyContinue
+
+# ---------------------------------------------------------------------
+'=== F2. 卸载预检 / 收尾核验 / 退出码合成 / 提权账户（假对象 + 临时位置，不依赖 Excel）==='
+# council C1/C2/C4 回归：「卸载不干净却显示卸载完成」三连 + 提权账户假报「已部署」。
+# install.ps1 / install-elevated.ps1 的新逻辑全部是可注入假对象 / 临时注册表键的函数。
+
+# F2-1 卸载预检的文件占用判定
+$f2dir = Join-Path $base 'f2'
+New-Item -ItemType Directory -Force -Path $f2dir | Out-Null
+$preText = Get-FunctionsText $installPath @('Test-AddInFileLocked')
+Check ($preText.Contains('function Test-AddInFileLocked')) 'F2 取到 install.ps1 的预检函数'
+. ([scriptblock]::Create($preText))
+$lockFile = Join-Path $f2dir 'AttachLink.xlam'
+[IO.File]::WriteAllText($lockFile, 'x')
+Check (-not (Test-AddInFileLocked $lockFile)) 'F2 预检：文件存在且未被占用 → 不阻碍卸载'
+Check (-not (Test-AddInFileLocked (Join-Path $f2dir 'no-such.xlam'))) 'F2 预检：文件不存在 → 不算占用'
+$fsLock = [IO.File]::Open($lockFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+try {
+    Check (Test-AddInFileLocked $lockFile) 'F2 预检：有「拒绝共享」的打开方在场 → 判定占用（卸载不得继续）'
+} finally { $fsLock.Close() }
+
+# F2-2 council C2：Invoke-AddInUnregister 追加「卸载前已存在的进程仍存活 → 不能确认退出」
+#   探针①（复核者已复现）：旧 PID 111 一直活着、新 PID 222 已退出——原实现误报 ExitConfirmed=true
+Reset-UnregisterFixture @(111) @(111, 222)
+$ains = New-FakeAddInList
+$script:fakeLive = @{ 111 = $true }
+$r = Invoke-FakeUnregister 'ok'
+Check ($r.Unregistered -and -not $r.ExitConfirmed) 'F2 注销确认：旧 PID 仍存活、新 PID 已退出 → 不确认（不得假确认）'
+Check ($r.Error -like '*仍在运行*') 'F2 注销确认：失败原因写明「仍在运行」'
+#   探针②（复核者已复现）：创建失败且没有新 PID、旧 PID 111 活着——原实现也返回 true
+Reset-UnregisterFixture @(111) @(111)
+$script:fakeLive = @{ 111 = $true }
+$r = Invoke-FakeUnregister 'throw'
+Check (-not $r.Unregistered -and -not $r.ExitConfirmed) 'F2 注销确认：创建失败、无新 PID，但旧 PID 仍存活 → 不确认'
+#   反向：旧 PID 是墓碑残影（IsLive=false）→ 不拦确认
+Reset-UnregisterFixture @(111) @(111, 222)
+$ains = New-FakeAddInList
+$script:fakeLive = @{ 111 = $false }
+$r = Invoke-FakeUnregister 'ok'
+Check ($r.Unregistered -and $r.ExitConfirmed) 'F2 注销确认：旧 PID 是墓碑残影（已退出）→ 照常确认'
+#   IsLive 查询出错 → fail-closed，不确认
+Reset-UnregisterFixture @(111) @(111, 222)
+$ains = New-FakeAddInList
+$liveProbeBoom = { param($id) throw '查询出错' }
+$r = Invoke-AddInUnregister -CreateExcel { New-FakeExcelApp $ains } -GetExcelIds $getIds -IsAlive $probe -IsLive $liveProbeBoom -TimeoutSeconds 1 -PollMilliseconds 20 3>$null
+Check ($r.Unregistered -and -not $r.ExitConfirmed) 'F2 注销确认：存活状态查询出错 → 不确认（fail-closed）'
+
+# F2-3 用户级卸载收尾核验（Get-UninstallResidue：xlam / 旧子目录 / 全版本受信任位置 / 旧引导器 / 存活 Excel）
+$regText2 = Get-FunctionsText $installPath @('Get-UninstallResidue')
+Check ($regText2.Contains('function Get-UninstallResidue') -and $regText2.Contains('AddinsData\AttachLinkShim.Connect')) 'F2 取到残留核验函数，且覆盖旧 COM 缓存键 AddinsData\AttachLinkShim.Connect'
+. ([scriptblock]::Create($regText2))
+$resBase = Join-Path $f2dir 'res'
+New-Item -ItemType Directory -Force -Path $resBase, (Join-Path $resBase 'AttachLink') | Out-Null
+[IO.File]::WriteAllText((Join-Path $resBase 'AttachLink.xlam'), 'x')
+[IO.File]::WriteAllText((Join-Path $resBase 'AttachLinkShim.dll'), 'x')
+$rhive = Join-Path $regBase 'OfficeRes'
+New-Item -Path "$rhive\15.0\Excel\Security\Trusted Locations\AttachLink" -Force | Out-Null
+$noneAlive = { @() }
+# ComShimKeys 显式传空：本机真实存在 AddinsData\AttachLinkShim.Connect（spec 实证），
+# 单测只看注入的临时键，不读真实 Excel 键
+$res = @(Get-UninstallResidue -ListCleaned $true -XlamPath (Join-Path $resBase 'AttachLink.xlam') `
+    -LegacyDir (Join-Path $resBase 'AttachLink') -HiveRoot $rhive -ComShimKeys @() -GetLiveExcel $noneAlive)
+Check ($res.Count -eq 4) ('F2 残留核验：副本 + 旧子目录 + 15.0 信任位置 + 旧引导器 DLL 共 4 项；实际 ' + $res.Count)
+Check (($res | Where-Object { $_ -like '加载项副本*' }).Count -eq 1) 'F2 残留核验：加载项副本残留被列出'
+Check (($res | Where-Object { $_ -like '旧子目录*' }).Count -eq 1) 'F2 残留核验：旧子目录残留被列出'
+Check (($res | Where-Object { $_ -like '受信任位置登记*15.0*Security*' }).Count -eq 1) 'F2 残留核验：另一个 Office 版本的受信任位置残留被列出'
+Check (($res | Where-Object { $_ -like '旧 COM 引导器文件*AttachLinkShim.dll*' }).Count -eq 1) 'F2 残留核验：AddIns 目录下的旧引导器 DLL 被列出'
+# 旧 COM 缓存键（AddinsData）走注入的临时键验证
+$shimKey = Join-Path $regBase 'ShimCache\AttachLinkShim.Connect'
+New-Item -Path $shimKey -Force | Out-Null
+$res = @(Get-UninstallResidue -ListCleaned $true -XlamPath (Join-Path $f2dir 'ghost.xlam') `
+    -LegacyDir (Join-Path $f2dir 'ghostdir') -HiveRoot (Join-Path $regBase 'NoSuchHive') `
+    -ComShimKeys @($shimKey) -GetLiveExcel $noneAlive)
+Check ($res.Count -eq 1 -and $res[0] -like '旧 COM 引导器登记*') 'F2 残留核验：旧 COM 缓存键残留被列出'
+Remove-Item (Split-Path -Parent $shimKey) -Recurse -Force -ErrorAction SilentlyContinue
+$res = @(Get-UninstallResidue -ListCleaned $false -XlamPath (Join-Path $f2dir 'ghost.xlam') `
+    -LegacyDir (Join-Path $f2dir 'ghostdir') -HiveRoot (Join-Path $regBase 'NoSuchHive') -ComShimKeys @() -GetLiveExcel $noneAlive)
+Check ($res.Count -eq 1 -and $res[0] -like '加载项列表登记*') 'F2 残留核验：仅登记未清净 → 只有登记一项（退出码 9 契约）'
+$res = @(Get-UninstallResidue -ListCleaned $true -XlamPath (Join-Path $f2dir 'ghost.xlam') `
+    -LegacyDir (Join-Path $f2dir 'ghostdir') -HiveRoot (Join-Path $regBase 'NoSuchHive') -ComShimKeys @() -GetLiveExcel { @(5, 6) })
+Check ($res.Count -eq 1 -and $res[0] -like '*pid 5、6*') 'F2 残留核验：收尾时仍有存活 Excel → 列出 PID，处置为重新运行卸载'
+$res = @(Get-UninstallResidue -ListCleaned $true -XlamPath (Join-Path $f2dir 'ghost.xlam') `
+    -LegacyDir (Join-Path $f2dir 'ghostdir') -HiveRoot (Join-Path $regBase 'NoSuchHive') -ComShimKeys @() -GetLiveExcel $noneAlive)
+Check ($res.Count -eq 0) 'F2 残留核验：全部干净 → 空清单（才允许说「卸载完成」）'
+Remove-Item $resBase -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $rhive -Recurse -Force -ErrorAction SilentlyContinue
+
+# F2-4 setup.ps1 卸载退出码合成（优先级 8 > 10 > 9 > 0）
+$suText = Get-FunctionsText (Join-Path $PSScriptRoot 'setup.ps1') @('Get-UninstallExitCode')
+Check ($suText.Contains('function Get-UninstallExitCode')) 'F2 取到 setup.ps1 的退出码合成函数'
+. ([scriptblock]::Create($suText))
+Check ((Get-UninstallExitCode $true $true $true) -eq 8) 'F2 退出码合成：机器级残留 → 8（最高优先级）'
+Check ((Get-UninstallExitCode $true $false $false) -eq 8) 'F2 退出码合成：仅机器级残留 → 8'
+Check ((Get-UninstallExitCode $false $true $true) -eq 10) 'F2 退出码合成：用户级残留（含登记未清净）→ 10'
+Check ((Get-UninstallExitCode $false $false $true) -eq 9) 'F2 退出码合成：仅登记未清净 → 9（既有契约）'
+Check ((Get-UninstallExitCode $false $false $false) -eq 0) 'F2 退出码合成：全部干净 → 0'
+
+# F2-5 install-elevated.ps1：SID 一致判定 + 机器级卸载残留核验
+$elevPath = Join-Path $repo 'build\install-elevated.ps1'
+$elText = Get-FunctionsText $elevPath @('Test-SameUserSid', 'Get-MachineUninstallResidue')
+Check ($elText.Contains('function Test-SameUserSid') -and $elText.Contains('function Get-MachineUninstallResidue')) 'F2 取到 install-elevated.ps1 的 SID 判定与机器级残留核验函数'
+. ([scriptblock]::Create($elText))
+Check (Test-SameUserSid 'S-1-5-21-1' 's-1-5-21-1') 'F2 SID 判定：同一 SID（大小写不敏感）→ 一致'
+Check (-not (Test-SameUserSid 'S-1-5-21-1' 'S-1-5-21-2')) 'F2 SID 判定：不同 SID（用了别的管理员账户）→ 不一致'
+Check (Test-SameUserSid '' 'S-1-5-21-1') 'F2 SID 判定：交互用户未知 → 不拦（保持现有行为，只多提示）'
+$mDir = Join-Path $f2dir 'machine'
+New-Item -ItemType Directory -Force -Path $mDir | Out-Null
+$mHive = Join-Path $regBase 'MachineOffice'
+New-Item -Path "$mHive\14.0\Excel\Security\Trusted Locations\AttachLink" -Force | Out-Null
+$res = @(Get-MachineUninstallResidue -Task 'AttachLink Watchdog' -Dir $mDir -TrustedRoot $mHive `
+    -GetTask { param($n) @('x') } -GetWdProcs { @([pscustomobject]@{ ProcessId = 77 }) })
+Check ($res.Count -eq 4) ('F2 机器级残留核验：任务 + 目录 + 14.0 信任位置 + 看门狗进程共 4 项；实际 ' + $res.Count)
+Check (($res | Where-Object { $_ -like '计划任务*' }).Count -eq 1) 'F2 机器级残留核验：计划任务仍在 → 列出'
+Check (($res | Where-Object { $_ -like '部署目录*' }).Count -eq 1) 'F2 机器级残留核验：部署目录仍在 → 列出'
+Check (($res | Where-Object { $_ -like '*14.0*' }).Count -eq 1) 'F2 机器级残留核验：另一版本 HKLM 信任位置仍在 → 列出'
+Check (($res | Where-Object { $_ -like '看门狗进程*77*' }).Count -eq 1) 'F2 机器级残留核验：看门狗进程仍在 → 列出 PID'
+$res = @(Get-MachineUninstallResidue -Task 'X' -Dir (Join-Path $f2dir 'ghost') -TrustedRoot (Join-Path $regBase 'NoSuchHive') `
+    -GetTask { param($n) @() } -TestDir { param($p) $false } -GetWdProcs { @() })
+Check ($res.Count -eq 0) 'F2 机器级残留核验：全部干净 → 空清单（才允许报「卸载完成」）'
+Remove-Item $mDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $mHive -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $f2dir -Recurse -Force -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------------
 # 公共：被测看门狗（独立日志）与真实 Excel 实例

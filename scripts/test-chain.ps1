@@ -49,6 +49,19 @@ function Test-Menu($app) {
     } finally { Release-Com $ctrls; Release-Com $bar; Release-Com $bars }
     return $found
 }
+function Remove-MenuTagControls($app) {
+    # 删除右键菜单上所有带 AttachLinkCtx 标签的控件（仅用于清理命令栏缓存残留；集合与条目逐个释放）
+    $bars = $null; $bar = $null; $ctrls = $null
+    try {
+        $bars = $app.CommandBars
+        $bar = $bars.Item('Cell')
+        $ctrls = $bar.Controls
+        for ($i = [int]$ctrls.Count; $i -ge 1; $i--) {
+            $ctrl = $null
+            try { $ctrl = $ctrls.Item($i); if ($ctrl.Tag -eq 'AttachLinkCtx') { $ctrl.Delete() } } finally { Release-Com $ctrl }
+        }
+    } finally { Release-Com $ctrls; Release-Com $bar; Release-Com $bars }
+}
 function Get-AddInInstalled($app) {
     # AttachLink.xlam 的 Installed 状态；读不到返回 $null
     $result = $null
@@ -128,7 +141,31 @@ try {
     '[2] 基线：该实例不应有右键菜单'
     $baseline = Test-Menu $xl
     if ($baseline) {
-        "    baseline menu = True（机器级看门狗抢先装载所致，属预期竞态，不影响结论）"
+        # 三态区分（真三态，不是「一切异常都算死菜单」）：
+        #   notfound = Workbooks.Item 抛 DISP_E_BADINDEX（0x8002000B）→ 加载项工作簿不在位 → 命令栏缓存残留（死菜单），清理；
+        #   found    = 取到工作簿 → 机器级看门狗抢先装载（属预期竞态，不清理）；
+        #   unknown  = 其余异常（宿主正忙等）→ 无法确认在位情况 → 不清理、如实打印，按已有菜单继续。
+        # Excel 会把非临时的内置命令栏控件写入 %APPDATA%\Microsoft\Excel\Excel15.xlb，此后每个新实例
+        # （含 COM 自动化拉起的）都带着它启动；看门狗据菜单 Tag 判「已在位」而不装载（2026-11-24 受控复现）。
+        # 残留来自在实例里创建非临时 AttachLinkCtx 控件并正常退出的测试 / 探针——测试与探针不得这样做。
+        $wbState = 'unknown'
+        $w0 = $null
+        try { $w0 = $wbs.Item('AttachLink.xlam'); if ($null -ne $w0) { $wbState = 'found' } } catch {
+            $hr = 0
+            try { $hr = [int]$_.Exception.InnerException.HResult } catch {}
+            if ($hr -eq 0) { try { $hr = [int]$_.Exception.HResult } catch {} }
+            if ($hr -eq -2147352565) { $wbState = 'notfound' }   # DISP_E_BADINDEX (0x8002000B)
+        } finally { Release-Com $w0 }
+        if ($wbState -eq 'notfound') {
+            "    baseline menu = True，但加载项工作簿不在位 → 命令栏缓存残留的 AttachLinkCtx 控件（死菜单）"
+            "    已从本实例移除残留控件（本实例随后正常退出会把缓存写干净）；看门狗下个周期应正常装载"
+            Remove-MenuTagControls $xl
+            $baseline = $false
+        } elseif ($wbState -eq 'found') {
+            "    baseline menu = True（机器级看门狗抢先装载所致，属预期竞态，不影响结论）"
+        } else {
+            "    无法确认在位情况（Workbooks.Item 返回 0x{0:X8}），按已有菜单继续" -f $hr
+        }
     } else {
         "    baseline menu = False"
     }
@@ -250,6 +287,7 @@ try {
     Close-TestInstance $xl $wbs $testPid
     Close-TestInstance $xl2 $wbs2 $pid2
     foreach ($w in @($wd2, $wd)) { if ($w -and -not $w.HasExited) { try { Stop-Process -Id $w.Id -Force } catch {} } }
-    Remove-Item $log1, $log2 -Force -ErrorAction SilentlyContinue
+    # 提前终止时 $log2 可能尚未赋值：先滤掉空值，否则 Remove-Item 会报参数绑定错误（-ErrorAction 管不住）
+    Remove-Item (@($log1, $log2) | Where-Object { $_ }) -Force -ErrorAction SilentlyContinue
 }
-"RESULT: " + $(if ($menu -and $installed -and $pinOk -and $warmOk) { 'PASS' } else { 'FAIL' })
+if ($menu -and $installed -and $pinOk -and $warmOk) { "RESULT: PASS"; exit 0 } else { "RESULT: FAIL"; exit 1 }

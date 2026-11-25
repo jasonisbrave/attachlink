@@ -5,6 +5,7 @@
 # Excel 另存重基为 ../ 相对路径指回账套）+ 归档目录残留旧手工副本。
 # 验证移动语义与链接改写：源夹移除、账套根保留、同名覆盖以源为准、
 # 未引用文件一并移动、多出的旧文件保留、全部链接改写为「附件\文件名」。
+# V5：文件被独占占用导致移动失败时，该文件链接保持原地址不改写、汇总单列。
 # 用法：powershell -ExecutionPolicy Bypass -File test-migrate.ps1
 # 期望末行：RESULT: PASS（夹具自动清理；FAIL 时保留现场供检查）
 # 注意：本文件含中文，必须保存为 UTF-8 with BOM（PS5.1 编码陷阱见 WORKLOG #11）。
@@ -76,6 +77,45 @@ $addrB = @($wbB.Worksheets.Item(1).Hyperlinks | ForEach-Object { $_.Address })
 Check ($addrB -contains "$attach\a.pdf")                'WP-B 链接已改写为相对地址'
 $wbB.Close($false)
 Check (Test-Path "$arch\$attach\b.pdf")                 '改写后相对地址可解析到文件'
+
+'--- V5：文件被独占占用 → 移动失败，链接不改写、汇总单列 ---'
+$base5 = Join-Path $env:TEMP 'opencode\alm5'
+$zht5 = "$base5\zht\14370003000"; $srcA5 = "$zht5\$attach"
+$arch5 = "$base5\arch"; $dstA5 = "$arch5\$attach"
+Remove-Item $base5 -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $srcA5, $arch5 | Out-Null
+Set-Content "$srcA5\x.pdf" -Value 'X-content'
+Set-Content "$srcA5\y.pdf" -Value 'Y-content'
+$wbC = $xl.Workbooks.Add()
+$i = 1
+foreach ($lnk in @("$srcA5\x.pdf", "$srcA5\y.pdf")) {
+    $null = $wbC.Worksheets.Item(1).Hyperlinks.Add($wbC.Worksheets.Item(1).Cells.Item($i, 1), $lnk, '', 'L' + $i)
+    $i++
+}
+$wbC.SaveAs("$arch5\WP-C.xlsx", 51)
+$wbC.Close($false)
+# 迁移前链接地址基线（保存后已被 Excel 重基为相对路径）
+$wbPre = $xl.Workbooks.Open("$arch5\WP-C.xlsx")
+$addrXpre = [string]$wbPre.Worksheets.Item(1).Hyperlinks.Item(1).Address
+$wbPre.Close($false)
+# 独占占用 x.pdf 后运行迁移
+$lock5 = [IO.File]::Open("$srcA5\x.pdf", 'Open', 'Read', 'None')
+try {
+    $null = $xl.Workbooks.Open("$arch5\WP-C.xlsx")
+    $s5 = [string]$xl.Run('AttachLink_ArchiveMigrateCore', $srcA5)
+    ($s5 -split "`n") | ForEach-Object { "    $_" }
+    Check ($s5 -like '*链接保持原样*' -and $s5 -like '*x.pdf*') 'V5: 汇总单列移动失败文件'
+    Check (Test-Path "$srcA5\x.pdf")                          'V5: 占用文件仍在源处（移动失败）'
+    Check (-not (Test-Path "$dstA5\x.pdf"))                   'V5: 归档附件夹无该文件'
+    Check ((Test-Path "$dstA5\y.pdf") -and -not (Test-Path "$srcA5\y.pdf")) 'V5: 其余文件正常移动'
+    $wbC2 = $xl.Workbooks.Open("$arch5\WP-C.xlsx")
+    $addrXpost = [string]$wbC2.Worksheets.Item(1).Hyperlinks.Item(1).Address
+    $addrYpost = [string]$wbC2.Worksheets.Item(1).Hyperlinks.Item(2).Address
+    $wbC2.Close($false)
+    Check ($addrXpost -eq $addrXpre)                          'V5: 失败文件链接地址保持原样'
+    Check ($addrYpost -eq "$attach\y.pdf")                    'V5: 成功文件链接正常改写'
+} finally { $lock5.Close() }
+Remove-Item $base5 -Recurse -Force -ErrorAction SilentlyContinue
 
 # ---- 清理 ----
 try { foreach ($wb in @($xl.Workbooks)) { $wb.Saved = $true }; $xl.Quit() } catch {}

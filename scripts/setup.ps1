@@ -16,6 +16,32 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $root     = Split-Path -Parent $PSScriptRoot
 $buildDir = Join-Path $root 'build'
 $distXlam = Join-Path $root 'dist\AttachLink.xlam'
+$preXlam  = Join-Path $env:APPDATA 'Microsoft\AddIns\AttachLink.xlam'
+
+function Get-BlockingExcelProcesses {
+    # 存活的 Excel（WorkingSet64 > 1MB，过滤已退出但被句柄持有的墓碑残影）
+    return @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue |
+        Where-Object { $_.WorkingSet64 -gt 1MB })
+}
+function Test-AddInFileLocked([string]$Path) {
+    # 加载项文件被占用判定：以「拒绝一切共享」的方式尝试打开——共享冲突或其它 IO 异常都算占用；
+    # 文件不存在则不算占用。
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        $fs.Close()
+        return $false
+    } catch { return $true }
+}
+function Get-UninstallExitCode([bool]$MachineResidue, [bool]$UserResidue, [bool]$UserListOpenFail) {
+    # 卸载结论合成（按事实，优先级 8 > 10 > 9 > 0）：
+    #   8 机器级有残留；10 用户级有残留（文件 / 注册表 / 收尾核验发现的任何残留）；
+    #   9 仅用户级加载项列表登记未清净；0 全部核验干净。
+    if ($MachineResidue) { return 8 }
+    if ($UserResidue) { return 10 }
+    if ($UserListOpenFail) { return 9 }
+    return 0
+}
 
 Write-Host ''
 Write-Host '==================================================='
@@ -86,19 +112,51 @@ if (-not $Uninstall) {
     Write-Host '==================================================='
 }
 else {
+    # ---- 0. 卸载前预检（council C1）：有存活的 Excel、或加载项文件被占用 → 不卸载 ----
+    # 开着 Excel（或 WPS 表格等占用方）点卸载：文件删不掉，且旧会话退出时会把内存里的加载项登记
+    # 写回注册表——界面却显示「卸载完成」。预检不通过绝不允许跳过。
+    while ($true) {
+        $liveXlPre = @(Get-BlockingExcelProcesses)
+        $fileLocked = Test-AddInFileLocked $preXlam
+        if ($liveXlPre.Count -eq 0 -and -not $fileLocked) { break }
+        $reason = @()
+        if ($liveXlPre.Count -gt 0) {
+            $reason += ('检测到 Excel 正在运行（pid ' + (($liveXlPre | ForEach-Object { $_.Id }) -join '、') + '）')
+        }
+        if ($fileLocked) { $reason += "加载项文件被占用：$preXlam" }
+        if ($NonInteractive) {
+            Write-Host ('>> 错误：' + ($reason -join '；') + '。')
+            Write-Host '>> 卸载未执行：请先关闭所有 Excel（含鼎信诺、WPS 表格）以及其它打开了该加载项的程序，然后重新运行卸载。'
+            exit 2
+        }
+        Write-Host ''
+        Write-Host ('>> 无法卸载：' + ($reason -join '；'))
+        Write-Host '   请关闭所有 Excel（含鼎信诺、WPS 表格）以及其它打开了该加载项的程序。'
+        $ans = (Read-Host '   关闭后直接回车重新检查；输入 Q 退出').Trim().ToUpper()
+        if ($ans -eq 'Q') { Write-Host '已取消卸载。'; exit 1 }
+    }
+
     Write-Host ''
     Write-Host '>> 正在一键卸载 AttachLink（用户级 + 机器级看门狗）...'
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $buildDir 'install.ps1') -Uninstall
     $userExit = $LASTEXITCODE
-    $userLevelOpenFail = $false
+    $userLevelOpenFail = $false   # 仅「加载项列表登记未清净」（exit 9 的既有契约）
+    $userResidue = $false         # 用户级按事实核验发现的任何其它残留（exit 10）
     if ($userExit -eq 9) {
         # oracle 三轮：子脚本「加载项列表清理未完全成功」需原样传播（GUI 退出码承诺 9），不得被 throw 吞成 1
         $userLevelOpenFail = $true
         Write-Host '注意：用户级卸载的加载项列表（OPEN / Add-in Manager）登记未能完全清理（见上方警告），继续机器级检查。'
     }
+    elseif ($userExit -eq 10) {
+        # 用户级有残留（副本 / 受信任位置 / 旧引导器 / 收尾仍有存活 Excel）：记下并按事实合成退出码，继续机器级检查
+        $userResidue = $true
+        Write-Host '注意：用户级卸载有残留（清单见上方），继续机器级检查。'
+    }
     elseif ($userExit -ne 0) { throw '用户级卸载失败，请把上方错误信息反馈给分发人。' }
-    Write-Host ''
-    Write-Host '用户级已卸载（日常 Excel 的加载项/受信任位置/副本已移除）。'
+    if ($userExit -eq 0) {
+        Write-Host ''
+        Write-Host '用户级已卸载（日常 Excel 的加载项/受信任位置/副本已移除，且经核验无残留）。'
+    }
 
     # ---- 机器级看门狗：检测并一并卸载（一键整合，2026-11-23）----
     # 旧版只打印手动提示，留给用户跑第二步。鼎信诺场景的同事只跑了用户级
@@ -116,7 +174,9 @@ else {
     $hasDir  = Test-Path $machineDir
     $machineFailed = $false
     if (-not ($hasTask -or $hasDir -or $tlHklm)) {
-        Write-Host '未检测到机器级看门狗部署——本机无需第二步，卸载完成。'
+        if (-not ($userResidue -or $userLevelOpenFail)) {
+            Write-Host '未检测到机器级看门狗部署——本机无需第二步。'
+        }
     }
     else {
         $machineFailed = $false
@@ -163,14 +223,24 @@ else {
     # 正在运行的 Excel 会话内，菜单会保留到该会话关闭（#21 单实例驻留同族）
     $liveXl = Get-Process -Name EXCEL -ErrorAction SilentlyContinue | Where-Object { $_.WorkingSet64 -gt 1MB }
     Write-Host ''
-    if ($machineFailed) {
+    # 按事实合成最终退出码（优先级 8 > 10 > 9 > 0）；「卸载完成」只在核验干净时说
+    $finalCode = Get-UninstallExitCode $machineFailed $userResidue $userLevelOpenFail
+    if ($finalCode -eq 8) {
         Write-Host '结果：卸载未完全成功（见上方残留清单），已打开会话中的菜单保留到其关闭。'
         exit 8
     }
-    if ($userLevelOpenFail) {
+    if ($finalCode -eq 10) {
+        Write-Host '结果：机器级已处理，但用户级卸载有残留（清单见上方）。'
+        Write-Host '      请关闭所有 Excel（含鼎信诺、WPS 表格）后重新运行卸载；仍失败则按清单手动处理。'
+        exit 10
+    }
+    if ($finalCode -eq 9) {
         Write-Host '结果：机器级已卸载，但用户级加载项列表（OPEN / Add-in Manager）登记未能完全清理（见上方警告）。'
         exit 9
     }
+    # 两级都卸干净：收尾清理看门狗日志（存在才删）
+    $wdLog = Join-Path $env:TEMP 'AttachLinkWatchdog.log'
+    if (Test-Path -LiteralPath $wdLog) { Remove-Item -LiteralPath $wdLog -Force -ErrorAction SilentlyContinue }
     if ($liveXl) {
         Write-Host '注意：检测到 Excel 正在运行——已打开会话中的右键菜单会保留到其关闭，'
         Write-Host '      完全退出所有 Excel 后重新打开即不再出现。'
