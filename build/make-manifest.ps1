@@ -101,6 +101,20 @@ function Invoke-MakeManifest {
     if (-not (Test-Path $exe))    { throw "未找到 $exe（请先运行 build\make-exe.ps1）" }
     if (-not (Test-Path $readme)) { throw "未找到 $readme（发布目录应含 README.md）" }
 
+    # 发布前版本一致性（v1.5.1 起）：README 的 Release 徽章与配置表里的版本号必须与本次发布一致——
+    # 这个 README 会原样进 zip，写错版本就是交付物自相矛盾（一级复核在 v1.5.1 发现过配置表漏改）
+    $readmeText = [IO.File]::ReadAllText($readme, [Text.Encoding]::UTF8)
+    $badge = [regex]::Match($readmeText, '(?m)^\[!\[Release v([0-9][0-9A-Za-z.\-]*)\]\(https://img\.shields\.io/badge/Release-v([0-9][0-9A-Za-z.\-]*)-[0-9A-Fa-f]+\)\]')
+    if (-not $badge.Success) { throw "README.md 顶部找不到 Release 徽章行，无法核对版本号。" }
+    if ($badge.Groups[1].Value -ne $Version -or $badge.Groups[2].Value -ne $Version) {
+        throw "README.md 顶部的 Release 徽章是 v$($badge.Groups[1].Value)：与本次发布（v$Version）不一致，请先更新 README 再打包。"
+    }
+    $row = [regex]::Match($readmeText, '(?m)^\|\s*`ATTACHLINK_VERSION`\s*\|\s*`"([^"]+)"`\s*\|')
+    if (-not $row.Success) { throw "README.md 配置表里找不到 ATTACHLINK_VERSION 行，无法核对版本号。" }
+    if ($row.Groups[1].Value -ne $Version) {
+        throw "README.md 配置表的版本号（$($row.Groups[1].Value)）与本次发布（v$Version）不一致，请先更新 README 再打包。"
+    }
+
     # 意外文件检查：*.log 忽略不打包，其它列出警告（不入包）
     $expected = @('AttachLinkSetup.exe', 'README.md', 'latest.json')
     $unexpected = Get-ChildItem $ReleaseDir -File |

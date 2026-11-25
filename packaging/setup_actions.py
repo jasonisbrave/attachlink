@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 r"""
-AttachLink 安装器 —— 动作层（v1.5.0）
+AttachLink 安装器 —— 动作层（v1.5.1）
 - 业务逻辑全部走内嵌的 PowerShell 脚本（setup.ps1 / install-elevated.ps1 / healthcheck.ps1），本模块只负责
   编排、退出码解读与结果文案，不含任何界面代码；界面见 setup_gui.py（不复制业务逻辑，单一事实源）。
 - 动作（均接收一个带 .put(line) 的队列对象，逐行推送日志；返回 ActionResult）：

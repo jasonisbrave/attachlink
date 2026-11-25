@@ -309,6 +309,49 @@ with mock.patch("urllib.request.urlopen",
     m, worked = su.fetch_manifest(manifest_url=loop_base, log=lambda s: None)
 check(m["version"] == "1.4.9", "_check_final_url：最终地址 github.com https → 放行")
 
+# ---------------- 2b3b) v1.5.1：GitHub 把 Release 资产 302 到资产主机，直连取清单曾被白名单拦下 ----------------
+ASSET_FINAL = "https://release-assets.githubusercontent.com/github-production-release-asset/123/abc?x=1"
+asset_url = f"https://github.com/{su.REPO}/releases/download/v9/AttachLink-9.zip"
+check(su._final_url_allowed(ASSET_FINAL, asset_url, False),
+      "_final_url_allowed：本仓库 Release 资产地址 → GitHub 资产主机 放行")
+check(su._final_url_allowed(ASSET_FINAL, su.MANIFEST_URL, False),
+      "_final_url_allowed：清单地址（releases/latest/download）→ GitHub 资产主机 放行")
+check(su._final_url_allowed(ASSET_FINAL, su.MIRROR_PREFIXES[0] + asset_url, False),
+      "_final_url_allowed：内置加速镜像 → GitHub 资产主机 放行")
+check(su._final_url_allowed("https://objects.githubusercontent.com/github-production-release-asset/1/2", asset_url, False),
+      "_final_url_allowed：旧的资产主机同样放行")
+check(not su._final_url_allowed(ASSET_FINAL, "https://github.com/other/repo/releases/download/v9/a.zip", False),
+      "_final_url_allowed：别的仓库的资产地址 → 拒绝")
+check(not su._final_url_allowed(ASSET_FINAL, f"https://github.com/{su.REPO}/raw/main/x.zip", False),
+      "_final_url_allowed：本仓库但不是 Release 资产路径 → 拒绝")
+check(not su._final_url_allowed(ASSET_FINAL, "https://evil.example.com/" + asset_url, False),
+      "_final_url_allowed：任意第三方来源跳到资产主机 → 拒绝")
+check(not su._final_url_allowed("http://release-assets.githubusercontent.com/x", asset_url, False),
+      "_final_url_allowed：资产主机被降级到 http → 拒绝")
+check(not su._final_url_allowed("https://release-assets.githubusercontent.com.evil.example/x", asset_url, False),
+      "_final_url_allowed：仿冒资产主机（后缀拼接）→ 拒绝")
+check(not su._final_url_allowed(ASSET_FINAL, loop_base, True),
+      "_final_url_allowed：回环测试清单跳到资产主机 → 拒绝")
+# 走完整取清单链路：GitHub 直连地址被 302 到资产主机 → 能取到内容
+with mock.patch("urllib.request.urlopen",
+                fake_urlopen({su.MANIFEST_URL: lambda: RedirectResp(VALID_MJSON, ASSET_FINAL)})):
+    try:
+        _status, _ctype, _body = su._http_get(su.MANIFEST_URL, 5, allow_loopback_http=False, max_bytes=su.MAX_MANIFEST_BYTES)
+        check(_status == 200 and su.verify_manifest_signature(su.json.loads(_body.decode("utf-8"))),
+              "_http_get：直连清单被 302 到 GitHub 资产主机 → 取到且验签通过")
+    except su.UpdateError as e:
+        check(False, f"_http_get：直连清单被 302 到 GitHub 资产主机 → 取到（实际报错：{e.message[:60]}）")
+# 只看「请求主机是不是内置镜像」不够：镜像可以代理任意地址，那不应获得资产主机的放行
+check(not su._final_url_allowed(ASSET_FINAL, su.MIRROR_PREFIXES[0] + "https://evil.example/x", False),
+      "_final_url_allowed：内置镜像代理别的地址 → 不放行资产主机")
+check(not su._final_url_allowed(ASSET_FINAL, su.MIRROR_PREFIXES[0] + "https://github.com/other/repo/releases/download/v9/a.zip", False),
+      "_final_url_allowed：内置镜像代理别的仓库的资产 → 不放行资产主机")
+check(not su._final_url_allowed(ASSET_FINAL, su.MIRROR_PREFIXES[0] + asset_url.replace("https://", "http://"), False),
+      "_final_url_allowed：内置镜像代理 http 形态的资产地址 → 不放行资产主机")
+for _h in sorted(su.GITHUB_ASSET_REDIRECT_HOSTS):
+    check(su._final_url_allowed(f"https://{_h}/github-production-release-asset/1/2", asset_url, False),
+          f"_final_url_allowed：资产主机 {_h} 放行")
+
 # ---------------- 2c) 回环清单只直连；User-Agent 仅 ASCII ----------------
 loop_base = "http://127.0.0.1:8765/latest.json"
 loop_calls = []
@@ -497,6 +540,59 @@ with mock.patch("urllib.request.urlopen",
     m, worked = su.fetch_manifest(current_version="1.4.5", log=lambda s: None)
 check(m["version"] == "1.4.4" and worked == FP0 and len(b4e_calls) == 1,
       "fetch_manifest：总时限已到 → 不再用直连复核")
+# ---- v1.5.1 补强：直连复核的边界（一级 oracle 复核建议）----
+# 组合用例：镜像旧清单 → 直连复核，直连被 302 到 GitHub 资产主机 → 取直连结果，并清空「上次成功的镜像」记录
+# （注意：清空后后续下载仍是镜像优先、直连兜底，并不是直连优先）
+su._last_good_prefix = ""
+b4f_calls = []
+with mock.patch("urllib.request.urlopen",
+                fake_urlopen({FP0 + su.MANIFEST_URL: lambda: FakeResp(OLD_MJSON, ctype="application/json"),
+                              su.MANIFEST_URL: lambda: RedirectResp(NEW_MJSON, ASSET_FINAL)}, b4f_calls)):
+    m, worked = su.fetch_manifest(current_version="1.4.5", log=lambda s: None)
+check(m["version"] == "1.4.9" and worked == "" and su._last_good_prefix == "" and len(b4f_calls) == 2,
+      "fetch_manifest：直连复核被 302 到 GitHub 资产主机 → 取直连结果并清空镜像优先记录")
+# 直连那份反而更旧（两份都验签有效）→ 保留镜像结果，不让「最新版本」被旧清单拉低
+MID_MJSON = json.dumps(manifest(version="1.4.5", size_zip=10)).encode("utf-8")
+su._last_good_prefix = ""
+b4g_logs = []
+with mock.patch("urllib.request.urlopen",
+                fake_urlopen({FP0 + su.MANIFEST_URL: lambda: FakeResp(MID_MJSON, ctype="application/json"),
+                              su.MANIFEST_URL: lambda: FakeResp(OLD_MJSON, ctype="application/json")})):
+    m, worked = su.fetch_manifest(current_version="1.4.5", log=b4g_logs.append)
+check(m["version"] == "1.4.5" and worked == FP0 and su._last_good_prefix == FP0,
+      "fetch_manifest：直连清单比镜像旧 → 保留镜像结果并记录镜像前缀")
+check(any("低于加速镜像" in s for s in b4g_logs), "fetch_manifest：直连更旧时日志如实说明")
+# 复核失败沿用镜像时，也要记录这个成功的镜像前缀（下次优先，不必重试已失败的前缀）
+su._last_good_prefix = ""
+with mock.patch("urllib.request.urlopen",
+                fake_urlopen({FP0 + su.MANIFEST_URL: lambda: FakeResp(OLD_MJSON, ctype="application/json"),
+                              su.MANIFEST_URL: urllib.error.URLError("direct down")})):
+    m, worked = su.fetch_manifest(current_version="1.4.5", log=lambda s: None)
+check(worked == FP0 and su._last_good_prefix == FP0, "fetch_manifest：复核失败沿用镜像 → 记录镜像前缀")
+
+
+def _fake_get_factory(seen):
+    """替代 _http_get：镜像返回旧清单、直连返回新清单，并记录每次调用拿到的超时值"""
+    def _fake_get(url, timeout, **kw):
+        seen.append(timeout)
+        if url == su.MANIFEST_URL:
+            return 200, "application/json", NEW_MJSON
+        return 200, "application/json", OLD_MJSON
+    return _fake_get
+
+
+# 复核超时受剩余总时限约束：预算充足取 5 秒；临近总时限取「剩余预算」与 1 秒下限的较大者（总时限是软预算）
+seen_t = []
+with mock.patch.object(su, "_http_get", _fake_get_factory(seen_t)):
+    su.fetch_manifest(current_version="1.4.5", log=lambda s: None)
+check(seen_t == [su.MANIFEST_TIMEOUT, 5.0], f"fetch_manifest：预算充足时复核超时为 5 秒（实际 {seen_t}）")
+seen_t = []
+mono_near = iter([0.0, 29.5, 29.5])   # start=0；循环检查=29.5；复核剩余预算=0.5 秒
+with mock.patch.object(su, "_http_get", _fake_get_factory(seen_t)), \
+     mock.patch.object(su, "_monotonic", lambda: next(mono_near)):
+    m, worked = su.fetch_manifest(current_version="1.4.5", log=lambda s: None)
+check(seen_t == [su.MANIFEST_TIMEOUT, 1.0] and m["version"] == "1.4.9",
+      f"fetch_manifest：临近总时限 → 复核超时取 1 秒下限且仍完成复核（实际 {seen_t}）")
 su._last_good_prefix = ""   # 还原，避免影响后续用例的前缀顺序
 
 # ---------------- 4) download_package（哈希不符换前缀；全部不符删 .part 抛 verify） ----------------

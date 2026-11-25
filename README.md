@@ -1,6 +1,6 @@
 # AttachLink —— 审计底稿附件链接加载项
 
-[![Release v1.5.0](https://img.shields.io/badge/Release-v1.5.0-217346)](https://github.com/jasonisbrave/attachlink/releases)
+[![Release v1.5.1](https://img.shields.io/badge/Release-v1.5.1-217346)](https://github.com/jasonisbrave/attachlink/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-217346)](https://github.com/jasonisbrave/attachlink/blob/main/LICENSE)
 ![Platform Windows](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
 ![Excel 2010+](https://img.shields.io/badge/Excel-2010%2B-217346?logo=microsoftexcel&logoColor=white)
@@ -466,7 +466,7 @@ v1.5.0 起安装器提供「检查更新」与「一键更新」。安装器右�
 | `HOTKEY_INSERT` | `"^+a"` | 插入附件链接快捷键（`""` = 禁用） |
 | `HOTKEY_INDEX` | `"^+k"` | 附件清单快捷键 |
 | `INDEX_SHEET_NAME` | `"附件清单"` | 清单工作表名 |
-| `ATTACHLINK_VERSION` | `"1.5.0"` | 版本号（单一事实源：安装器标题/自检、两级部署哈希核对均引用） |
+| `ATTACHLINK_VERSION` | `"1.5.1"` | 版本号（单一事实源：安装器标题/自检、两级部署哈希核对均引用） |
 
 ## 常见问题
 

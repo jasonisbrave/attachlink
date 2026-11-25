@@ -55,6 +55,9 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.5.1：安装器修复——GitHub 直连取更新清单被「最终地址白名单」拦下（GitHub 把 Release 资产 302 到
+'       release-assets.githubusercontent.com）；现对本仓库的 Release 资产地址与内置加速镜像放行该跳转。
+'       本版 VBA 功能无变化，仅版本号
 ' 1.5.0：附件身份与可信重连（插入即登记 SHA-256；同名同内容复用、异内容自动另存「名(n).ext」；
 '       断链修复按内容哈希分层重连，候选不唯一不猜）/ 基线安全读写（先写临时文件回读校验、备份后替换，
 '       损坏或未来格式不覆盖）/ 体检增强（同次体检同一文件只算一次哈希、状态栏进度、Esc 取消）/
@@ -79,7 +82,7 @@ Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ■ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.5.0"
+Public Const ATTACHLINK_VERSION As String = "1.5.1"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"

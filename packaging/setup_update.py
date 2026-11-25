@@ -35,6 +35,13 @@ MANIFEST_URL = f"https://github.com/{REPO}/releases/latest/download/latest.json"
 MIRROR_PREFIXES = ["https://gh-proxy.com/", "https://ghfast.top/", "https://ghproxy.net/"]
 ALLOWED_DOWNLOAD_HOST = "github.com"
 ALLOWED_DOWNLOAD_PATH_PREFIX = f"/{REPO}/releases/download/"
+# GitHub 会把 Release 资产（清单与安装包）302 到下列主机。只有当请求目标确实是本仓库的 Release 资产地址、
+# 或是内置加速镜像时，才允许最终地址落在这些主机上（v1.5.1：此前不在白名单，GitHub 直连取清单一律被拦下）
+GITHUB_ASSET_REDIRECT_HOSTS = {
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+}
 HTTP_TIMEOUT = 20          # 秒
 MANIFEST_TIMEOUT = 8       # 秒
 MAX_PACKAGE_BYTES = 200 * 1024 * 1024
@@ -171,9 +178,33 @@ def _resp_fields(resp) -> tuple:
     return status, content_type
 
 
+def _is_github_release_asset_url(url: str) -> bool:
+    """是否本仓库在 GitHub 上的 Release 资产地址：安装包（releases/download/…）或清单（releases/latest/download/…）。"""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if (parts.scheme or "").lower() != "https" or (parts.hostname or "").lower() != ALLOWED_DOWNLOAD_HOST:
+        return False
+    return (parts.path.startswith(ALLOWED_DOWNLOAD_PATH_PREFIX)
+            or parts.path.startswith(f"/{REPO}/releases/latest/download/"))
+
+
+def _mirror_targets_release_asset(requested_url: str) -> bool:
+    """请求地址是否为「内置加速镜像前缀 + 本仓库的 Release 资产地址」。
+    只看请求主机是不是镜像还不够：镜像可以代理任意地址（如 <镜像>https://evil.example/x），
+    那种请求不应获得 GitHub 资产主机的放行。"""
+    for prefix in MIRROR_PREFIXES:
+        if requested_url.startswith(prefix):
+            return _is_github_release_asset_url(requested_url[len(prefix):])
+    return False
+
+
 def _final_url_allowed(final_url: str, requested_url: str, allow_loopback_http: bool) -> bool:
     """最终地址（urllib 自动跟随重定向之后）白名单：https 且主机 ∈ {github.com, 内置镜像主机, 请求目标主机}；
-    本地测试模式（allow_loopback_http）额外放行回环主机的 http/https。除此之外一律不可信。"""
+    请求目标是本仓库的 Release 资产地址、或「内置镜像 + 本仓库 Release 资产地址」时，额外放行 GitHub 的资产重定向主机；
+    本地测试模式（allow_loopback_http）额外放行回环主机的 http/https。除此之外一律不可信。
+    只检查最终地址，不逐跳检查中间重定向（内容另有签名与哈希校验兜底）。"""
     try:
         parts = urllib.parse.urlsplit(final_url)
     except ValueError:
@@ -185,12 +216,17 @@ def _final_url_allowed(final_url: str, requested_url: str, allow_loopback_http: 
     if scheme != "https":
         return False
     hosts = {ALLOWED_DOWNLOAD_HOST}
-    for prefix in MIRROR_PREFIXES:
-        hosts.add((urllib.parse.urlsplit(prefix).hostname or "").lower())
+    mirror_hosts = {(urllib.parse.urlsplit(p).hostname or "").lower() for p in MIRROR_PREFIXES}
+    hosts |= mirror_hosts
     try:
-        hosts.add((urllib.parse.urlsplit(requested_url).hostname or "").lower())   # 调用方显式指定的前缀主机
+        requested_host = (urllib.parse.urlsplit(requested_url).hostname or "").lower()
     except ValueError:
-        pass
+        requested_host = ""
+    hosts.add(requested_host)                    # 调用方显式指定的前缀主机
+    # GitHub 直连与内置加速镜像都可能把 Release 资产 302 到 GitHub 的资产主机：仅当请求目标确实是
+    # 本仓库的 Release 资产地址、或是「内置镜像 + 本仓库资产地址」时才放行这一跳（别的来源跳到资产主机仍然拒绝）
+    if _is_github_release_asset_url(requested_url) or _mirror_targets_release_asset(requested_url):
+        hosts |= GITHUB_ASSET_REDIRECT_HOSTS
     if allow_loopback_http:
         hosts |= _LOOPBACK_HOSTS
     return host in hosts
@@ -469,26 +505,32 @@ def fetch_manifest(mirror=None, log=print, manifest_url=None, current_version=No
             # 直连复核：加速镜像说「没有新版本」时，向权威来源（GitHub 直连）多问一次，
             # 防止镜像缓存旧清单导致误报「已是最新」。镜像有新版时立即返回（有效签名的新版本
             # 清单本身就是可用的，不必复核）；回环模式只有直连一个候选，天然不会进这里。
-            if (prefix and current_version and parse_version(current_version) is not None
-                    and parse_version(manifest.get("version")) is not None
-                    and not is_newer(manifest["version"], current_version)
-                    and MANIFEST_TOTAL_TIMEOUT - (_monotonic() - start) > 0):
+            do_recheck = bool(prefix and current_version and parse_version(current_version) is not None
+                              and parse_version(manifest.get("version")) is not None
+                              and not is_newer(manifest["version"], current_version))
+            # 总时限是软预算：发起复核前看一眼剩余时间，复核超时取「剩余预算」与 5 秒的较小值（下限 1 秒）
+            remaining = (MANIFEST_TOTAL_TIMEOUT - (_monotonic() - start)) if do_recheck else 0.0
+            if do_recheck and remaining > 0:
                 log("加速镜像返回的清单版本不高于当前版本，用 GitHub 直连复核一次（防镜像缓存旧清单）…")
                 try:
-                    d_status, _dc, d_body = _http_get(base, min(MANIFEST_TIMEOUT, 5.0),
+                    d_status, _dc, d_body = _http_get(base, max(1.0, min(MANIFEST_TIMEOUT, 5.0, remaining)),
                                                       allow_loopback_http=True,
                                                       max_bytes=MAX_MANIFEST_BYTES)
                     d_manifest, d_reason = (None, f"HTTP {d_status}") if d_status != 200 \
                         else _parse_manifest_body(d_body, relax)
                 except UpdateError as e:
                     d_manifest, d_reason = None, e.message
-                if d_manifest is not None:
+                if d_manifest is not None and not is_newer(manifest["version"], d_manifest["version"]):
+                    # 直连那份不比镜像旧（通常更新）：以直连为准；清空「上次成功的镜像」记录
+                    # （后续下载仍按「镜像优先、直连兜底」的顺序——镜像通常比直连快）
                     log("加速镜像可能存在缓存，已用 GitHub 直连复核（以直连结果为准）")
                     _last_good_prefix = ""
                     return d_manifest, ""
-                log(f"直连复核未成功（{d_reason}），沿用加速镜像结果（经加速镜像取得，可能有缓存延迟）")
-            else:
-                _last_good_prefix = prefix
+                if d_manifest is not None:
+                    log("直连清单的版本低于加速镜像，保留加速镜像结果")
+                else:
+                    log(f"直连复核未成功（{d_reason}），沿用加速镜像结果（经加速镜像取得，可能有缓存延迟）")
+            _last_good_prefix = prefix      # 走到这里说明这个镜像前缀取到了有效清单：下次优先
             return manifest, prefix
         errors.append(f"{url}：{reason}")
         log(f"该地址失败，换下一个：{reason}")
