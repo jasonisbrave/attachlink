@@ -197,7 +197,10 @@ function Invoke-MakeManifest {
     Write-Host "zip         SHA-256：$shaZip"
     Write-Host "exe         SHA-256：$shaExe"
     Write-Host "latest.json SHA-256：$shaJson"
-    Write-Host "latest.json 已用发布密钥签名（公钥指纹 CD23935E180DE8CE）"
+    # 公钥指纹 = 私钥文件 SHA-256 前 16 位（与 build\new-release-key.ps1 打印的一致，核对备份时逐字比对）。
+    # 运行时现算、不硬编码：换钥后这里如果还印着旧指纹，发布 SOP 里「看到指纹才算成功」这一步就会误导人
+    $keyFingerprint = (Get-Sha256Hex $KeyFile).Substring(0, 16).ToLower()
+    Write-Host "latest.json 已用发布密钥签名（公钥指纹 $keyFingerprint）"
     Write-Host "发布附件：$zipPath 与 $manifestPath（二者都要作为 Release 资产上传）"
 }
 

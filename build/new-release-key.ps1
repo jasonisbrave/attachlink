@@ -50,7 +50,7 @@ $e = [long]0
 $exp = [byte[]]$p.Exponent
 [array]::Reverse($exp)
 foreach ($b in $exp) { $e = $e * 256 + $b }
-$fp = (Get-FileHash -LiteralPath $keyFile -Algorithm SHA256).Hash.Substring(0, 16)
+$fp = (Get-FileHash -LiteralPath $keyFile -Algorithm SHA256).Hash.Substring(0, 16).ToLower()   # 小写：与 build\make-manifest.ps1 现算并打印的指纹逐字一致
 Write-Host ""
 Write-Host "公钥指纹（私钥文件 SHA-256 前 16 位，便于日后核对备份）：$fp"
 Write-Host "把下面两行嵌入 packaging\setup_update.py："

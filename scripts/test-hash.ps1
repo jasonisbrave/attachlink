@@ -85,6 +85,100 @@ $r4 = ColF $xl "$wbDir\main.xlsx"
 Check ($r4.vals["$attach\a.pdf"] -eq '一致 v1')                'a.pdf 一致'
 Check ($r4.vals["$attach\b.pdf"] -eq '一致 v1')                'b.pdf 一致'
 
+'--- 5) 哈希引擎矩阵（R4：CAPI 主路径 / certutil / 纯 VBA 回退 / 生产分派） ---'
+$engDir = "$base\eng"
+$engCnDir = "$engDir\哈希夹具目录"
+New-Item -ItemType Directory -Force -Path $engCnDir | Out-Null
+function Write-RandBytes([int]$n, [string]$path, [int]$seed) {
+    $bytes = New-Object byte[] $n
+    $rnd = New-Object System.Random $seed
+    $rnd.NextBytes($bytes)
+    [System.IO.File]::WriteAllBytes($path, $bytes)
+}
+$fixtures = @()
+# 0 字节 / 1 字节 / abc(3) / 63 / 64 / 65 字节
+New-Item -ItemType File -Force -Path "$engDir\empty.bin" | Out-Null
+[IO.File]::WriteAllBytes("$engDir\one.bin", [byte[]](0x41))
+[IO.File]::WriteAllText("$engDir\abc.bin", 'abc')
+Write-RandBytes 63  "$engDir\b63.bin"  63
+Write-RandBytes 64  "$engDir\b64.bin"  64
+Write-RandBytes 65  "$engDir\b65.bin"  65
+# 跨 4MB 分块边界：4MB-1 / 4MB / 4MB+1
+Write-RandBytes 4194303 "$engDir\m4mb_minus1.bin" 4194303
+Write-RandBytes 4194304 "$engDir\m4mb.bin"        4194304
+Write-RandBytes 4194305 "$engDir\m4mb_plus1.bin"  4194305
+# 约 10MB 随机内容
+$bigBytes = New-Object byte[] (10MB)
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bigBytes)
+[IO.File]::WriteAllBytes("$engDir\rand10mb.bin", $bigBytes)
+$rng.Dispose()
+# 中文文件名 + 中文子目录
+[IO.File]::WriteAllText("$engCnDir\附件甲·乙#.pdf", 'chinese-name-content')
+foreach ($f in (Get-ChildItem $engDir -File)) { $fixtures += $f.FullName }
+foreach ($f in (Get-ChildItem $engCnDir -File)) { $fixtures += $f.FullName }
+
+$smallForVba = @{}   # engine 3（纯 VBA）仅对小夹具断言（慢）
+foreach ($p in @("$engDir\empty.bin", "$engDir\one.bin", "$engDir\abc.bin", "$engDir\b63.bin", "$engDir\b64.bin", "$engDir\b65.bin")) { $smallForVba[$p.ToLower()] = $true }
+
+foreach ($fp in $fixtures) {
+    $name = Split-Path $fp -Leaf
+    $expected = ([string](Get-FileHash $fp -Algorithm SHA256).Hash).ToLower()
+    $h1 = [string]$xl.Run('AttachLink_HashEngine', $fp, 1)
+    Check ($h1 -eq $expected) "engine1(CAPI) $name 与 Get-FileHash 一致"
+    $h2 = [string]$xl.Run('AttachLink_HashEngine', $fp, 2)
+    Check ($h2 -eq $expected) "engine2(certutil) $name 与 Get-FileHash 一致"
+    $h0 = [string]$xl.Run('AttachLink_HashEngine', $fp, 0)
+    Check ($h0 -eq $expected) "engine0(生产分派) $name 与 Get-FileHash 一致"
+    if ($smallForVba.ContainsKey($fp.ToLower())) {
+        $h3 = [string]$xl.Run('AttachLink_HashEngine', $fp, 3)
+        Check ($h3 -eq $expected) "engine3(纯VBA) $name 与 Get-FileHash 一致"
+    }
+}
+
+'--- 6) 标准向量 ---'
+$hEmpty = [string]$xl.Run('AttachLink_HashEngine', "$engDir\empty.bin", 1)
+Check ($hEmpty -eq 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') '空文件 SHA-256 标准向量（CAPI）'
+$hAbc = [string]$xl.Run('AttachLink_HashEngine', "$engDir\abc.bin", 1)
+Check ($hAbc -eq 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') 'abc 文件 SHA-256 标准向量（CAPI）'
+
+'--- 7) 引擎状态与计数语义 ---'
+$state = [string]$xl.Run('AttachLink_HashEngineState')
+"    HashEngineState: $state"
+Check ($state -match 'capi=1') "HashEngineState 报 capi=1（实际 $state）"
+Check ($state -match 'win64=1') "HashEngineState 报 win64=1（实际 $state）"
+$null = $xl.Run('AttachLink_ResetHashCount')
+[void][string]$xl.Run('AttachLink_HashEngine', "$engDir\abc.bin", 0)
+$hc1 = [long]$xl.Run('AttachLink_GetHashCount')
+Check ($hc1 -eq 1) "engine0 计 1 次真实计算（实际 $hc1）"
+[void][string]$xl.Run('AttachLink_HashEngine', "$engDir\abc.bin", 1)
+$hc2 = [long]$xl.Run('AttachLink_GetHashCount')
+Check ($hc2 -eq 1) "engine1 直调不计数（实际 $hc2）"
+
+'--- 8) CAPI 不可用时，生产分派经回退链仍得到正确哈希（测试钩子把本会话的 CAPI 标成「自检失败」） ---'
+$prevState = [long]$xl.Run('AttachLink_TestCapiState', -1)
+Check ([string]$xl.Run('AttachLink_HashEngineState') -match 'capi=-1') '钩子生效：HashEngineState 报 capi=-1'
+$null = $xl.Run('AttachLink_TestCapiState', 1)
+Check ([string]$xl.Run('AttachLink_HashEngineState') -match 'capi=-1') '钩子拒绝把状态直接置成 1（那会绕过自检；状态仍为 -1）'
+$null = $xl.Run('AttachLink_ResetHashCount')
+$fallbackFixtures = @("$engDir\empty.bin", "$engDir\one.bin", "$engDir\abc.bin", "$engDir\b64.bin", "$engDir\b65.bin", "$engDir\m4mb_minus1.bin", "$engDir\m4mb.bin", "$engDir\m4mb_plus1.bin", "$engDir\rand10mb.bin")
+foreach ($f in (Get-ChildItem $engCnDir -File)) { $fallbackFixtures += $f.FullName }
+$fallbackChecked = 0
+foreach ($fp in $fallbackFixtures) {
+    $expected = ([string](Get-FileHash $fp -Algorithm SHA256).Hash).ToLower()
+    $hf = [string]$xl.Run('AttachLink_HashEngine', $fp, 0)
+    Check ($hf -eq $expected) ("回退链（生产分派，CAPI 不可用）{0} 与 Get-FileHash 一致" -f (Split-Path $fp -Leaf))
+    $fallbackChecked++
+}
+$hcF = [long]$xl.Run('AttachLink_GetHashCount')
+Check ($hcF -eq $fallbackChecked) "回退路径每次生产分派仍只计 1 次真实计算（实际 $hcF / 应为 $fallbackChecked）"
+$capiDirect = [string]$xl.Run('AttachLink_HashEngine', "$engDir\abc.bin", 1)
+Check ($capiDirect -eq '') 'CAPI 标成不可用后，直调 CAPI（engine 1）返回空串（本会话不重试）'
+$null = $xl.Run('AttachLink_TestCapiState', 0)      # 还原为「尚未自检」：下次使用重新自检
+$hBack = [string]$xl.Run('AttachLink_HashEngine', "$engDir\abc.bin", 0)
+Check ($hBack -eq 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') '还原后重新自检通过，CAPI 恢复为主路径'
+Check ([string]$xl.Run('AttachLink_HashEngineState') -match 'capi=1') '还原并重新自检后 HashEngineState 报 capi=1'
+
 try { foreach ($w in @($xl.Workbooks)) { $w.Saved = $true }; $xl.Quit() } catch {}
 Start-Sleep 2
 if ($ok) { Remove-Item $base -Recurse -Force -ErrorAction SilentlyContinue; 'RESULT: PASS（夹具已清理）' } else { 'RESULT: FAIL（夹具保留在 ' + $base + '）' }

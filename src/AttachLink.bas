@@ -24,6 +24,9 @@ Attribute VB_Name = "AttachLink"
 '      【移动】到归档目录同级（不留副本；目标同名以账套原件覆盖），
 '      并把归档目录全部底稿的附件链接改写为相对地址（处理绝对路径
 '      与 ../ 指回两种形态），使归档件自包含
+'   7. 右键菜单（单元格右键）：插入附件链接（可多选）/ 插入文件夹引用 /
+'      插入底稿引用 / 归档迁移（批量）+ 「附件管理」子菜单（附件清单 / 体检、
+'      附件断链修复、附件版本更新、重命名链接显示名、附件删除）
 ' 设计约定：
 '   - 与鼎信诺 COM 加载项共存（走「Excel 加载项」通道，不注册 COM）
 '   - 底稿文件保持无宏（宏全部在本加载项内，不污染底稿）
@@ -46,7 +49,8 @@ Public Const ATTACH_FOLDER_NAME As String = "附件"
 Public Const SHOW_EXTENSION As Boolean = False
 ' True = 选中单元格不足时自动向下扩展（跳过非空格与合并格）
 Public Const AUTO_EXTEND_CELLS As Boolean = True
-' True = 「附件文件夹已存在」提示对同一文件夹每次会话仅弹一次；False = 每次插入都提示
+' True = 「附件文件夹已存在」提示对每个「插入入口 × 文件夹」每次会话仅弹一次
+' （三个入口相互独立）；False = 每次插入都提示
 Public Const NOTICE_ONCE_PER_FOLDER As Boolean = True
 ' 快捷键：插入附件链接 / 附件清单（改为 "" 可禁用）
 Public Const HOTKEY_INSERT As String = "^+a"    ' Ctrl+Shift+A
@@ -55,6 +59,14 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.6.0：稳定运行优先版（不扩功能面）——① SHA-256 改 advapi32 CAPI 原生实现优先（条件编译声明：
+'       Excel 64 位走 PtrSafe+LongPtr，WPS 走 #Else 分支；分块流式读取；首次使用做标准向量自检，失败则
+'       本会话回退），修复 WPS 下使用变慢（纯 VBA 实测 0.21 MB/s：插入 5MB 约 23 秒、体检 50MB 约
+'       4 分钟；CAPI 约 300 MB/s），certutil / 纯 VBA 仅作回退；② 底稿引用入口先做附件文件夹前置检查
+'       （选目标底稿之前），「文件夹已存在」提示改为每个插入入口对同一文件夹每次会话各提示一次；
+'       ③ 右键菜单重排：归档迁移提级到一级，「归档」子菜单更名「附件管理」，重命名链接显示名移入其中。
+'       看门狗（watchdog.ps1）同版改为只装载不登记 + 在位判定加固（菜单 Tag 与 Workbooks 三态联合确认，
+'       死菜单按未装载处理）。安装器修复一键更新后日志快照写错目录
 ' 1.5.1：安装器修复——GitHub 直连取更新清单被「最终地址白名单」拦下（GitHub 把 Release 资产 302 到
 '       release-assets.githubusercontent.com）；现对本仓库的 Release 资产地址与内置加速镜像放行该跳转。
 '       本版 VBA 功能无变化，仅版本号
@@ -82,7 +94,7 @@ Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ■ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.5.1"
+Public Const ATTACHLINK_VERSION As String = "1.6.0"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"
@@ -97,8 +109,38 @@ Private Const BASELINE_FILE As String = "_attachlink_baseline.csv"
 ' （.NET COM 路线已实测排除：SHA256Managed 在 .NET 4.x 无 ComputeHash_2、
 '  SHA256CryptoServiceProvider 未注册）。
 '（CAPI Declare 块已于 1.3.0 移除：WPS VBA 缺 LongPtr/PtrSafe 生态，哈希改经 certutil，见 Sha256File 注释）
-' 上次已提示过「已存在」的附件文件夹路径（会话级记忆，避免重复打扰）
-Private lastNotifiedAttachDir As String
+' CAPI Declare 块于 v1.6.0 以条件编译形态恢复（R4）：#If Win64 / #Else 双分支，
+' Excel 64 位（PtrSafe+LongPtr）与 WPS（VBA6 风格 #Else 分支）均编译运行通过
+' （1.3.0 当年失败根因是无条件使用 LongPtr，WPS 报「用户定义类型未定义」）
+#If Win64 Then
+Private Declare PtrSafe Function CryptAcquireContext Lib "advapi32.dll" Alias "CryptAcquireContextW" (ByRef phProv As LongPtr, ByVal pszContainer As LongPtr, ByVal pszProvider As LongPtr, ByVal dwProvType As Long, ByVal dwFlags As Long) As Long
+Private Declare PtrSafe Function CryptCreateHash Lib "advapi32.dll" (ByVal hProv As LongPtr, ByVal Algid As Long, ByVal hKey As LongPtr, ByVal dwFlags As Long, ByRef phHash As LongPtr) As Long
+Private Declare PtrSafe Function CryptHashData Lib "advapi32.dll" (ByVal hHash As LongPtr, ByVal pbData As LongPtr, ByVal dwDataLen As Long, ByVal dwFlags As Long) As Long
+Private Declare PtrSafe Function CryptGetHashParam Lib "advapi32.dll" (ByVal hHash As LongPtr, ByVal dwParam As Long, ByRef pbData As Byte, ByRef pdwDataLen As Long, ByVal dwFlags As Long) As Long
+Private Declare PtrSafe Function CryptDestroyHash Lib "advapi32.dll" (ByVal hHash As LongPtr) As Long
+Private Declare PtrSafe Function CryptReleaseContext Lib "advapi32.dll" (ByVal hProv As LongPtr, ByVal dwFlags As Long) As Long
+#Else
+Private Declare Function CryptAcquireContext Lib "advapi32.dll" Alias "CryptAcquireContextW" (ByRef phProv As Long, ByVal pszContainer As Long, ByVal pszProvider As Long, ByVal dwProvType As Long, ByVal dwFlags As Long) As Long
+Private Declare Function CryptCreateHash Lib "advapi32.dll" (ByVal hProv As Long, ByVal Algid As Long, ByVal hKey As Long, ByVal dwFlags As Long, ByRef phHash As Long) As Long
+Private Declare Function CryptHashData Lib "advapi32.dll" (ByVal hHash As Long, ByVal pbData As Long, ByVal dwDataLen As Long, ByVal dwFlags As Long) As Long
+Private Declare Function CryptGetHashParam Lib "advapi32.dll" (ByVal hHash As Long, ByVal dwParam As Long, ByRef pbData As Byte, ByRef pdwDataLen As Long, ByVal dwFlags As Long) As Long
+Private Declare Function CryptDestroyHash Lib "advapi32.dll" (ByVal hHash As Long) As Long
+Private Declare Function CryptReleaseContext Lib "advapi32.dll" (ByVal hProv As Long, ByVal dwFlags As Long) As Long
+#End If
+' CAPI 会话句柄（模块级保存，避免在多个函数签名里重复条件类型；0 = 未占用）
+#If Win64 Then
+Private capiHProv As LongPtr
+Private capiHHash As LongPtr
+#Else
+Private capiHProv As Long
+Private capiHHash As Long
+#End If
+' CAPI 可用性会话状态：0 未自检 / 1 可用 / -1 不可用（自检失败后本会话不再重试）
+Private capiState As Long
+' 已提示过「附件文件夹已存在」的（入口 × 文件夹）记录（会话级去重，避免重复
+' 打扰：键 = 入口标识 & "|" & 小写附件夹路径；NOTICE_ONCE_PER_FOLDER=False 时
+' 记录不参与判断，每次必提示）
+Private notifiedAttachDirs As Object
 ' 上次选取附件/文件夹的源目录（会话级记忆：插入对话框优先定位到这里，不再每次落在附件夹）
 Private lastSourceDir As String
 ' 基线最近一次解析/写入失败原因（SaveBaseline/LoadBaselineEx 写入，调用方带进提示）
@@ -238,35 +280,36 @@ Private Sub RegisterMenu(ByVal adding As Boolean)
         btn.Tag = MENU_TAG
 
         Set btn = cb.Controls.Add(1, , , 3, True)
-        btn.Caption = "重命名链接显示名"
-        btn.OnAction = "AttachLink_RenameLink"
-        btn.Tag = MENU_TAG
-
-        Set btn = cb.Controls.Add(1, , , 4, True)
         btn.Caption = "插入底稿引用"
         btn.OnAction = "AttachLink_InsertCrossRef"
         btn.Tag = MENU_TAG
 
-        ' 二级菜单：归档（迁移 / 体检 / 修复 / 版本更新 / 删除——归档前后步骤统一入口，1.3.1 浓缩，1.4.0 加删除）
+        Set btn = cb.Controls.Add(1, , , 4, True)
+        btn.Caption = "归档迁移（批量）"
+        btn.OnAction = "AttachLink_ArchiveMigrate"
+        btn.Tag = MENU_TAG
+
+        ' 二级菜单：附件管理（清单/体检 / 断链修复 / 版本更新 / 重命名 / 删除——
+        ' v1.6.0 R6 重排：归档迁移提级一级，重命名链接显示名移入子菜单）
         Dim pop As Object, subBtn As Object
         Set pop = cb.Controls.Add(10, , , 5, True)
-        pop.Caption = "归档"
+        pop.Caption = "附件管理"
         pop.Tag = MENU_TAG
         Set subBtn = pop.Controls.Add(1, , , 1, True)
-        subBtn.Caption = "归档迁移（批量）"
-        subBtn.OnAction = "AttachLink_ArchiveMigrate"
-        subBtn.Tag = MENU_TAG
-        Set subBtn = pop.Controls.Add(1, , , 2, True)
         subBtn.Caption = "附件清单 / 体检"
         subBtn.OnAction = "AttachLink_BuildIndex"
         subBtn.Tag = MENU_TAG
-        Set subBtn = pop.Controls.Add(1, , , 3, True)
+        Set subBtn = pop.Controls.Add(1, , , 2, True)
         subBtn.Caption = "附件断链修复"
         subBtn.OnAction = "AttachLink_Repair"
         subBtn.Tag = MENU_TAG
-        Set subBtn = pop.Controls.Add(1, , , 4, True)
+        Set subBtn = pop.Controls.Add(1, , , 3, True)
         subBtn.Caption = "附件版本更新"
         subBtn.OnAction = "AttachLink_UpdateVersion"
+        subBtn.Tag = MENU_TAG
+        Set subBtn = pop.Controls.Add(1, , , 4, True)
+        subBtn.Caption = "重命名链接显示名"
+        subBtn.OnAction = "AttachLink_RenameLink"
         subBtn.Tag = MENU_TAG
         Set subBtn = pop.Controls.Add(1, , , 5, True)
         subBtn.Caption = "附件删除（删链接+文件）"
@@ -304,7 +347,7 @@ Public Sub AttachLink_Insert()
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     Dim attachDir As String
-    attachDir = EnsureAttachDirPrompted(fso, wb)
+    attachDir = EnsureAttachDirPrompted(fso, wb, "insert", "本次插入的附件将归档复制到该文件夹")
     If Len(attachDir) = 0 Then Exit Sub
 
     Dim fd As Object
@@ -1702,7 +1745,7 @@ Public Sub AttachLink_InsertFolder()
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     Dim attachDir As String
-    attachDir = EnsureAttachDirPrompted(fso, wb)
+    attachDir = EnsureAttachDirPrompted(fso, wb, "folder", "本次插入的附件将归档复制到该文件夹")
     If Len(attachDir) = 0 Then Exit Sub
 
     Dim fd As Object
@@ -2580,6 +2623,11 @@ Public Sub AttachLink_InsertCrossRef()
 
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
+    ' R5：附件夹前置检查提到入口（三项校验之后、选目标底稿之前）——用户在选
+    ' 文件之前就知道底稿副本将归档到哪里，可当场退出；取消即退出，不打开目标底稿
+    Dim attachDir As String
+    attachDir = EnsureAttachDirPrompted(fso, wb, "crossref", "本次插入的底稿副本将归档复制到该文件夹")
+    If Len(attachDir) = 0 Then Exit Sub
 
     ' 第一步：选择底稿文件
     Dim fd As Object
@@ -2693,11 +2741,9 @@ Public Sub AttachLink_InsertCrossRef()
     If autoSecSet Then Application.AutomationSecurity = prevAutoSec
     stateCaptured = False
 
-    ' 第三步：归档目标底稿并插入链接（Core 与「插入附件链接」同一身份规则：
+    ' 第三步：归档目标底稿并插入链接（附件夹已在入口前置检查创建/核对；
+    ' Core 与「插入附件链接」同一身份规则：
     ' 同名同内容复用、同名异内容自动另存、插入即登记基线；自包含原则不变）
-    Dim attachDir As String
-    attachDir = EnsureAttachDirPrompted(fso, wb)
-    If Len(attachDir) = 0 Then Exit Sub
     Dim cellList As Collection
     Set cellList = FlattenSelection(Selection)
     If cellList.Count = 0 Then
@@ -3390,17 +3436,22 @@ Public Function AttachLink_GetVersion() As String
 End Function
 
 '====================== 内容基线（SHA-256）辅助 ======================
-' SHA-256 经系统 certutil 实现（WPS 兼容决策，2026-11-21）：WPS 的 VBA 环境缺少
-' LongPtr/PtrSafe 生态，CAPI Declare 触发「用户定义类型未定义」编译错误且按需
-' 编译会连带击穿调用链（清单/插入文件夹）。certutil 为 Windows 内置命令
-' （Win7+），经 WScript.Shell 隐藏窗口执行、输出落临时文件解析，无任何宿主
-' 类型依赖。代价：单文件约 50ms 进程开销（体检几十个附件数秒级，可接受；
-' 后续优化见开发交接 T14 哈希缓存）。
+' v1.6.0（R4）首选 advapi32 CAPI 原生 SHA-256：真实 WPS/Excel 实测约 300~350 MB/s
+' （1.5.1 的 WPS 纯 VBA 路径实测仅 0.21 MB/s：插入 1MB 4.7s / 5MB 23.3s / 20MB 94s，
+' 底稿引用 10MB 48.8s，体检 50MB 约 4 分钟，登记哈希成了主耗时）。CAPI 为系统原生
+' 组件、无子进程（WPS 拦截 WScript.Shell/VBA.Shell 子进程创建，certutil 在 WPS 不可用），
+' Excel 64 位与 WPS（#Else 分支）均编译运行通过，哈希与 Get-FileHash/标准向量一致。
+' 回退路径：CAPI 返回空时按宿主分派——WPS 纯 VBA → certutil；Excel certutil → 纯 VBA
+' （纯 VBA 含 50MB 护栏）。certutil 单文件约 150ms（Excel）进程开销，纯 VBA 仅兜底。
 Private Function Sha256File(ByVal filePath As String) As String
-    ' 宿主分派（2026-11-21）：WPS 宏安全拦截子进程创建（0x80070005）→ 纯 VBA；
-    ' Excel 走 certutil（快）。互为回退：任一路径失败自动尝试另一条（oracle：宿主误判/环境异常时兜底）
+    ' v1.6.0 分派：先 CAPI；空结果走原宿主回退链（宿主误判/环境异常时兜底，oracle 建议）
     hashComputeCount = hashComputeCount + 1   ' 真实计算计数（缓存命中不经过本函数）
     Dim h As String
+    h = Sha256CAPI(filePath)
+    If Len(h) > 0 Then
+        Sha256File = h
+        Exit Function
+    End If
     If IsWpsHost() Then
         h = Sha256VBA(filePath)
         If Len(h) = 0 Then h = Sha256Certutil(filePath)
@@ -3445,6 +3496,46 @@ End Function
 Public Function AttachLink_ResetHashCount() As Long
     hashComputeCount = 0
     AttachLink_ResetHashCount = 0
+End Function
+
+' 测试/诊断入口（R4，不含对话框）：按指定引擎计算文件 SHA-256（小写十六进制或 ""）。
+' engine：0 = 生产分派（等同 Sha256File，计入 hashComputeCount）；1 = 仅 CAPI；
+' 2 = 仅 certutil；3 = 仅纯 VBA。1~3 直调对应引擎，不改计数、不走缓存。
+Public Function AttachLink_HashEngine(ByVal filePath As String, ByVal engine As Long) As String
+    Select Case engine
+        Case 1
+            AttachLink_HashEngine = Sha256CAPI(filePath)
+        Case 2
+            AttachLink_HashEngine = Sha256Certutil(filePath)
+        Case 3
+            AttachLink_HashEngine = Sha256VBA(filePath)
+        Case Else
+            AttachLink_HashEngine = Sha256File(filePath)
+    End Select
+End Function
+
+' 测试/诊断入口（R4，不含对话框）：哈希引擎会话状态。
+' 返回形如 "capi=1;win64=0"（capi：0 未自检 / 1 可用 / -1 不可用；win64：条件编译 0/1）
+Public Function AttachLink_HashEngineState() As String
+#If Win64 Then
+    AttachLink_HashEngineState = "capi=" & capiState & ";win64=1"
+#Else
+    AttachLink_HashEngineState = "capi=" & capiState & ";win64=0"
+#End If
+End Function
+
+' 测试钩子（仅测试使用，已登记编译探针）：设置本会话的 CAPI 引擎状态并返回设置前的值。
+' newState：-1 = 视为「自检失败」（Sha256File 的生产分派改走回退链）；0 = 视为「尚未自检」（下次使用重新自检）；
+' 其它值一律忽略——尤其不允许直接置成 1（可用），那会跳过自检、在 CAPI 真有问题的机器上产出错误哈希。
+' 用于回归「CAPI 不可用时仍能经回退链得到正确哈希」；不读写任何文件，最坏后果是本会话哈希变慢。
+Public Function AttachLink_TestCapiState(ByVal newState As Long) As Long
+    AttachLink_TestCapiState = capiState
+    ' 只接受 -1 与 0：不允许把状态直接置成 1——那会跳过自检，在 CAPI 真有问题的机器上产出错误哈希
+    If newState = -1 Then
+        capiState = -1
+    ElseIf newState = 0 Then
+        capiState = 0
+    End If
 End Function
 
 ' ---- T14 进度助手：状态栏 + DoEvents（WPS 不支持状态栏时静默跳过，不得出错）----
@@ -3591,11 +3682,119 @@ Private Function IsWpsHost() As Boolean
     IsWpsHost = (InStr(1, p, "kingsoft", vbTextCompare) > 0) Or (InStr(1, p, "wps", vbTextCompare) > 0)
 End Function
 
+' ---- CAPI 原生 SHA-256（v1.6.0 R4 主路径，advapi32，无子进程/无 COM/.NET 依赖）----
+' 分块流式读取（VBA 原生 Open For Binary + Get，块 4MB），不设文件大小上限。
+' 句柄存模块级 capiHProv/capiHHash（类型随条件编译），CapiFinish 无论成败都
+' DestroyHash + ReleaseContext 并清零。
+Private Function Sha256CAPI(ByVal filePath As String) As String
+    On Error GoTo FailClose
+    Sha256CAPI = ""
+    If capiState < 0 Then Exit Function          ' 本会话自检失败过，不再重试（调用方回退）
+    If capiState = 0 Then                        ' 首次使用自检：两个标准向量（空输入、"abc"）
+        If Not CapiSelfTest() Then
+            capiState = -1
+            Exit Function
+        End If
+        capiState = 1
+    End If
+    Const CHUNK As Long = 4194304                ' 4MB
+    Dim f As Integer, fsize As Long, remaining As Long, n As Long
+    Dim buf() As Byte
+    f = FreeFile
+    Open filePath For Binary Access Read Shared As #f
+    fsize = LOF(f)
+    remaining = fsize
+    If Not CapiBegin() Then GoTo FailClose
+    Do While remaining > 0
+        n = remaining
+        If n > CHUNK Then n = CHUNK
+        ReDim buf(0 To n - 1)                    ' 最后一块按剩余字节数
+        Get #f, , buf()
+        If Not CapiFeed(buf, n) Then GoTo FailClose
+        remaining = remaining - n
+    Loop
+    Close #f
+    Sha256CAPI = CapiFinish()                    ' 空串即失败（句柄已在 CapiFinish 释放）
+    Exit Function
+FailClose:
+    On Error Resume Next
+    Close #f
+    CapiFinish
+End Function
+
+' CAPI 首次使用自检：两个标准 SHA-256 向量——空输入（0 字节文件走的就是这条路径）与 3 字节 "abc"，
+' 任一不符即判失败（调用方把 capiState 置 -1，本会话回退 certutil / 纯 VBA）
+Private Function CapiSelfTest() As Boolean
+    CapiSelfTest = False
+    If Not CapiBegin() Then Exit Function
+    If CapiFinish() <> "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" Then Exit Function
+    Dim buf(0 To 2) As Byte
+    buf(0) = 97: buf(1) = 98: buf(2) = 99
+    If Not CapiBegin() Then Exit Function
+    If Not CapiFeed(buf, 3) Then
+        CapiFinish
+        Exit Function
+    End If
+    CapiSelfTest = (CapiFinish() = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+End Function
+
+' CAPI：获取上下文并创建 SHA-256 哈希对象（失败即释放已得句柄）
+Private Function CapiBegin() As Boolean
+    Const PROV_RSA_AES As Long = 24
+    Const CALG_SHA_256 As Long = &H800C&
+    Const CRYPT_VERIFYCONTEXT As Long = &HF0000000
+    CapiBegin = False
+    If CryptAcquireContext(capiHProv, 0, 0, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) = 0 Then Exit Function
+    If CryptCreateHash(capiHProv, CALG_SHA_256, 0, 0, capiHHash) = 0 Then
+        CryptReleaseContext capiHProv, 0
+        capiHProv = 0
+        capiHHash = 0
+        Exit Function
+    End If
+    CapiBegin = True
+End Function
+
+' CAPI：喂入一段数据（n=0 跳过；数据指针取数组首元素地址，与探针一致）
+Private Function CapiFeed(buf() As Byte, ByVal n As Long) As Boolean
+    CapiFeed = False
+    If n = 0 Then CapiFeed = True: Exit Function
+    If capiHHash = 0 Then Exit Function
+    CapiFeed = (CryptHashData(capiHHash, VarPtr(buf(LBound(buf))), n, 0) <> 0)
+End Function
+
+' CAPI：取哈希值（小写十六进制）并无论成败都 DestroyHash + ReleaseContext、句柄清零
+Private Function CapiFinish() As String
+    CapiFinish = ""
+    If capiHHash <> 0 Then
+        Const HP_HASHVAL As Long = &H2&
+        Dim outb(0 To 31) As Byte, outLen As Long, i As Long, s As String
+        outLen = 32
+        If CryptGetHashParam(capiHHash, HP_HASHVAL, outb(0), outLen, 0) <> 0 Then
+            For i = 0 To outLen - 1
+                s = s & Right$("0" & Hex$(outb(i)), 2)
+            Next i
+            CapiFinish = LCase$(s)
+        End If
+        CryptDestroyHash capiHHash
+        capiHHash = 0
+    End If
+    If capiHProv <> 0 Then
+        CryptReleaseContext capiHProv, 0
+        capiHProv = 0
+    End If
+End Function
+
 Private Function Sha256Certutil(ByVal filePath As String) As String
     On Error GoTo Fail
     Sha256Certutil = ""
     Dim fso As Object, tmp As String, sh As Object, cmd As String, rc As Long
     Set fso = CreateObject("Scripting.FileSystemObject")
+    ' 空文件特判（R4）：certutil 对 0 字节文件报 0x800703ee（ERROR_FILE_INVALID），
+    ' 而空输入的 SHA-256 是固定标准向量，直接返回（与 Sha256VBA 空文件特判同理）
+    If fso.GetFile(filePath).Size = 0 Then
+        Sha256Certutil = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        Exit Function
+    End If
     ' 唯一临时文件（oracle：固定名在多 Excel 并发体检时会互相覆盖/读到旧结果，串哈希属证据正确性问题）
     tmp = Environ$("TEMP") & "\" & fso.GetTempName
     ' chcp 65001：中文路径下 certutil 标题行按 UTF-8 输出避免管道乱码；哈希行为纯 ASCII
@@ -4070,27 +4269,60 @@ Private Sub CheckFolderBaseline(ByVal fso As Object, ByVal base As Object, _
     If Err.Number <> 0 Then failCnt = failCnt + 1: Err.Clear
 End Sub
 
-' 前置检查（插入文件/文件夹共用）：附件文件夹不存在则自动创建；已存在则
-' 提示核对（NOTICE_ONCE_PER_FOLDER 语义）。返回附件夹路径；用户取消或
-' 创建失败返回 ""。
-Private Function EnsureAttachDirPrompted(ByVal fso As Object, ByVal wb As Object) As String
+' R5：附件夹前置提示的会话级去重记录（不含对话框，供回归直调）。
+' 语义：NOTICE_ONCE_PER_FOLDER=False → 每次都需要提示（Needed 恒 True）；
+' True → 每个「插入入口 × 附件夹」每次会话仅提示一次，三个入口相互独立。
+' 键 = 入口标识 & "|" & 小写附件夹路径（路径大小写不敏感）。
+Public Function AttachLink_FolderNoticeNeeded(ByVal attachDir As String, ByVal entryId As String) As Boolean
+    If Not NOTICE_ONCE_PER_FOLDER Then
+        AttachLink_FolderNoticeNeeded = True
+        Exit Function
+    End If
+    EnsureNoticeDict
+    AttachLink_FolderNoticeNeeded = Not notifiedAttachDirs.Exists(entryId & "|" & LCase$(attachDir))
+End Function
+
+' R5：登记「某入口对某附件夹已提示过一次」（已存在→提示、不存在→自动创建
+' 两个分支共用；只标记传入的那个入口）。
+Public Sub AttachLink_FolderNoticeMark(ByVal attachDir As String, ByVal entryId As String)
+    EnsureNoticeDict
+    Dim nKey As String
+    nKey = entryId & "|" & LCase$(attachDir)
+    If Not notifiedAttachDirs.Exists(nKey) Then notifiedAttachDirs.Add nKey, True
+End Sub
+
+' R5：清空提示记录（回归用；会话内回到「全部未提示」状态）。
+Public Sub AttachLink_FolderNoticeReset()
+    If Not notifiedAttachDirs Is Nothing Then notifiedAttachDirs.RemoveAll
+End Sub
+
+Private Sub EnsureNoticeDict()
+    If notifiedAttachDirs Is Nothing Then Set notifiedAttachDirs = CreateObject("Scripting.Dictionary")
+End Sub
+
+' 前置检查（三个插入入口共用）：附件文件夹不存在则自动创建；已存在则
+' 提示核对（NOTICE_ONCE_PER_FOLDER 语义，按「入口 × 文件夹」会话级去重）。
+' entryId = 入口标识（insert / folder / crossref）；purposeText 说明本次归档
+' 内容（附件/底稿副本）。返回附件夹路径；用户取消或创建失败返回 ""。
+Private Function EnsureAttachDirPrompted(ByVal fso As Object, ByVal wb As Object, _
+        ByVal entryId As String, ByVal purposeText As String) As String
     Dim attachDir As String
     attachDir = wb.Path & "\" & ATTACH_FOLDER_NAME
     If fso.FolderExists(attachDir) Then
-        If (Not NOTICE_ONCE_PER_FOLDER) Or StrComp(lastNotifiedAttachDir, attachDir, vbTextCompare) <> 0 Then
+        If AttachLink_FolderNoticeNeeded(attachDir, entryId) Then
             If MsgBox("当前底稿同级已存在「" & ATTACH_FOLDER_NAME & "」文件夹：" & vbCrLf & _
                       attachDir & vbCrLf & vbCrLf & _
-                      "本次插入的附件将归档复制到该文件夹，请先核对是否为目标目录。" & vbCrLf & vbCrLf & _
+                      purposeText & "，请先核对是否为目标目录。" & vbCrLf & vbCrLf & _
                       "「确定」继续选择　　「取消」退出本次插入", _
                       vbOKCancel + vbExclamation, "AttachLink") <> vbOK Then Exit Function
-            lastNotifiedAttachDir = attachDir
+            AttachLink_FolderNoticeMark attachDir, entryId
         End If
     Else
         If Not EnsureFolder(fso, attachDir) Then
             MsgBox "无法创建附件文件夹：" & attachDir, vbCritical, "AttachLink"
             Exit Function
         End If
-        lastNotifiedAttachDir = attachDir
+        AttachLink_FolderNoticeMark attachDir, entryId
         MsgBox "当前底稿同级不存在「" & ATTACH_FOLDER_NAME & "」文件夹，已自动创建：" & vbCrLf & attachDir, _
                vbInformation, "AttachLink"
     End If

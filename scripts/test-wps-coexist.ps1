@@ -202,24 +202,24 @@ if ($SkipRealWps -or -not $wpsType) {
                 if ($null -eq $obj) { return }
                 try { while ([System.Runtime.InteropServices.Marshal]::ReleaseComObject($obj) -gt 0) {} } catch {}
             }
-            function Get-WpsAddInInstalled($app) {
-                # WPS 的 AddIns.Item('名字') 取不到时只报错，改为逐个比对名字。返回 'True' / 'False'；读不到返回 'n/a'。
-                # 优先按下标遍历并逐个释放（不依赖 GC——被枚举过的集合只靠 GC 回收不可靠）；宿主不支持按下标取时退回枚举。
-                $addins = $null
+            function Get-WpsAddInLoaded($app) {
+                # 装载态判定（v1.6.0 R1 同步：登记位 ≠ 装载态，看门狗只装载不登记、也不改 Installed）：
+                # 按名字取 AttachLink.xlam 工作簿是否在位，返回 'True' / 'False'；查询出错返回 'n/a'。
+                # 逐个释放（含中间的 Workbooks 集合，不留给 GC——被枚举 / 取用过的集合靠 GC 回收不可靠）
+                $wbsL = $null; $bk = $null
                 try {
-                    $addins = $app.AddIns
-                    $n = [int]$addins.Count
-                    for ($i = 1; $i -le $n; $i++) {
-                        $ai = $null
-                        try { $ai = $addins.Item($i); if ($ai.Name -ieq 'AttachLink.xlam') { return ([string]([bool]$ai.Installed)) } } finally { Release-Com $ai }
-                    }
-                    return 'n/a'
+                    $wbsL = $app.Workbooks
+                    $bk = $wbsL.Item('AttachLink.xlam')
+                    return 'True'
                 } catch {
-                    try { foreach ($a in $app.AddIns) { if ($a.Name -ieq 'AttachLink.xlam') { return ([string]([bool]$a.Installed)) } } } catch {}
+                    $hr = 0
+                    try { $hr = [int]$_.Exception.InnerException.HResult } catch {}
+                    if ($hr -eq 0) { try { $hr = [int]$_.Exception.HResult } catch {} }
+                    if ($hr -eq -2147352565) { return 'False' }   # DISP_E_BADINDEX (0x8002000B) = 不在位
                     return 'n/a'
-                } finally { Release-Com $addins }
+                } finally { Release-Com $bk; Release-Com $wbsL }
             }
-            $instBefore = Get-WpsAddInInstalled $w
+            $loadedBefore = Get-WpsAddInLoaded $w
             $wb = $w.Workbooks.Add()          # 零工作簿实例没有 EXCEL7 窗口
             $deadline = (Get-Date).AddSeconds(15); $wins = @()
             while ($wins.Count -eq 0 -and (Get-Date) -lt $deadline) {
@@ -251,8 +251,8 @@ if ($SkipRealWps -or -not $wpsType) {
                 $alive = $false
                 try { $null = [string]$w.Caption; $alive = $true } catch {}
                 Check $alive 'WPS 测试实例仍可响应 COM 调用（未被卡死）'
-                $instAfter = Get-WpsAddInInstalled $w
-                Check ($instBefore -ne 'n/a' -and $instAfter -ne 'n/a' -and $instAfter -eq $instBefore) "WPS 内 AttachLink 加载项 Installed 状态可读且未被改动（$instBefore → $instAfter；读不到按不通过处理）"
+                $loadedAfter = Get-WpsAddInLoaded $w
+                Check ($loadedBefore -ne 'n/a' -and $loadedAfter -ne 'n/a' -and $loadedAfter -eq $loadedBefore) "WPS 内 AttachLink.xlam 装载态可读且未被改动（$loadedBefore → $loadedAfter；读不到按不通过处理）"
                 # 按名字取：加载项工作簿不在 Workbooks 的序号枚举里，逐个遍历会漏判
                 $xlamOpen = $false; $bkFound = $null
                 try { $bkFound = $w.Workbooks.Item('AttachLink.xlam'); $xlamOpen = $true } catch { $xlamOpen = $false }

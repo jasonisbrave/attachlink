@@ -691,4 +691,83 @@ check(r.kind == sa.PARTIAL and r.code == 12 and "其他管理员账户" in r.tit
 
 
 
+# ---------------- v1.6.0（R3）：图形界面日志快照写到旧安装器所在目录 ----------------
+# 缺陷：界面三处收尾 save_log_beside_exe(...) 没传 target_dir，交接模式下快照落进 %TEMP% 更新
+# 临时目录（用户看不到），而不是旧安装器所在目录。修复后统一走模块级 save_gui_log_snapshot。
+import ast as _ast
+
+_HERE_PACK = os.path.dirname(os.path.abspath(__file__))
+if _HERE_PACK not in _sys.path:
+    _sys.path.insert(0, _HERE_PACK)   # setup_gui 的 import setup_actions / setup_update 需要
+_sys.modules.setdefault("setup_actions", sa)   # 复用同一模块对象（打桩 sa.exe_dir 才生效）
+_spec_gui = importlib.util.spec_from_file_location("setup_gui", os.path.join(_HERE_PACK, "setup_gui.py"))
+sg = importlib.util.module_from_spec(_spec_gui)
+_sys.modules.setdefault("setup_gui", sg)
+_spec_gui.loader.exec_module(sg)   # 模块级只有常量与函数定义；Tk 窗口在 App.__init__，import 不开窗
+
+with tempfile.TemporaryDirectory() as d:
+    old_exe = os.path.join(d, "old", "AttachLinkSetup.exe")
+    os.makedirs(os.path.dirname(old_exe))
+    open(old_exe, "w").close()
+    exe_dir_tmp = os.path.join(d, "exedir")
+    os.makedirs(exe_dir_tmp)
+    real_exe_dir = sa.exe_dir
+    sa.exe_dir = lambda: exe_dir_tmp   # 源码态 exe_dir() 指向 packaging/ 源码目录，打桩到临时目录
+    try:
+        # (a) 交接模式：--updated-from <旧exe> → 快照落在旧安装器所在目录且内容一致
+        with mock.patch.object(_sys, "argv", ["setup_gui.py", "--updated-from", old_exe, "--wait-pid", "7"]):
+            got = sg.save_gui_log_snapshot("gui-log-text", "note-1")
+        snap_old = os.path.join(os.path.dirname(old_exe), "AttachLinkSetup.log")
+        check(got == snap_old and os.path.isfile(snap_old)
+              and open(snap_old, encoding="utf-8").read() == "gui-log-text\nnote-1\n",
+              "save_gui_log_snapshot：交接模式快照写到旧安装器所在目录且内容一致")
+        check(not os.path.exists(os.path.join(exe_dir_tmp, "AttachLinkSetup.log")),
+              "save_gui_log_snapshot：交接模式不写 exe 所在目录")
+        os.remove(snap_old)
+        # (b) 无 --updated-from → 回落 exe 所在目录
+        with mock.patch.object(_sys, "argv", ["setup_gui.py"]):
+            got = sg.save_gui_log_snapshot("plain-log")
+        snap_exe = os.path.join(exe_dir_tmp, "AttachLinkSetup.log")
+        check(got == snap_exe and os.path.isfile(snap_exe)
+              and open(snap_exe, encoding="utf-8").read() == "plain-log",
+              "save_gui_log_snapshot：无交接参数 → 快照写 exe 所在目录")
+        os.remove(snap_exe)
+        # (c) --updated-from 指向不存在的目录 → 回落 exe 所在目录
+        with mock.patch.object(_sys, "argv", ["setup_gui.py", "--updated-from", os.path.join(d, "ghost", "a.exe")]):
+            got = sg.save_gui_log_snapshot("fallback-log")
+        check(got == snap_exe and os.path.isfile(snap_exe)
+              and open(snap_exe, encoding="utf-8").read() == "fallback-log",
+              "save_gui_log_snapshot：旧目录不存在 → 回落 exe 所在目录")
+    finally:
+        sa.exe_dir = real_exe_dir
+
+# (d) 静态守卫：setup_gui.py 里每一处 save_log_beside_exe( 调用都必须带 target_dir 且在辅助函数内
+_gui_src = open(os.path.join(_HERE_PACK, "setup_gui.py"), encoding="utf-8").read()
+check('if __name__ == "__main__":' in _gui_src,
+      "setup_gui：有 __main__ 守卫（import 不创建 Tk 窗口）")
+
+class _CallGuard(_ast.NodeVisitor):
+    """记录每一处 save_log_beside_exe( 调用的（外层函数名, 是否带 target_dir）"""
+    def __init__(self):
+        self.stack = []
+        self.calls = []
+    def visit_FunctionDef(self, node):
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+    def visit_Call(self, node):
+        if isinstance(node.func, _ast.Name) and node.func.id == "save_log_beside_exe":
+            self.calls.append((self.stack[-1] if self.stack else "<module>",
+                               any(k.arg == "target_dir" for k in node.keywords)))
+        self.generic_visit(node)
+
+_guard = _CallGuard()
+_guard.visit(_ast.parse(_gui_src))
+check(len(_guard.calls) >= 1, "setup_gui：save_log_beside_exe 仍被调用（经 save_gui_log_snapshot）")
+check(all(fn == "save_gui_log_snapshot" and has_target for fn, has_target in _guard.calls),
+      f"setup_gui：每一处 save_log_beside_exe( 都在 save_gui_log_snapshot 内且带 target_dir（实际 { _guard.calls }）")
+check(hasattr(sg, "save_gui_log_snapshot"), "setup_gui：模块级辅助函数 save_gui_log_snapshot 存在")
+
+
+
 print("RESULT:", "PASS" if ok else "FAIL")

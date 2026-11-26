@@ -276,7 +276,7 @@ try {
     [IO.File]::WriteAllText("$g\AttachLinkSetup.log", "===== AttachLinkSetup /install-all =====`r`n[结果] 一键安装完成（退出码 0）`r`n", [Text.UTF8Encoding]::new($false))
 
     # --- 场景 1：半部署（有目录、无任务）+ 无受信任位置 → 有 fail，退出码 10 ---
-    '11-24 10:00:00 看门狗启动', '11-24 10:00:01 附着失败 hwnd=1 : 测试错误（退避重试）', '11-24 10:00:02 装载失败（AddIns 登记 / Workbooks.Open）: 测试用严重错误' | Set-Content $gLog -Encoding UTF8
+    '11-24 10:00:00 看门狗启动', '11-24 10:00:01 附着失败 hwnd=1 : 测试错误（退避重试）', '11-24 10:00:02 装载失败（Workbooks.Open）: 测试用严重错误' | Set-Content $gLog -Encoding UTF8
     $out1 = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $hcPath `
         -LogPath $gLog -PayloadDir $payloadDir -OfficeRootKey $officeRoot `
         -TaskName 'AttachLinkHealthTest-NoSuchTask' -MachineDir $machineDir)

@@ -51,13 +51,18 @@ MANIFEST_TOTAL_TIMEOUT = 30             # 秒：整轮清单获取（所有前�
 # 发布密钥（RSA 2048，RSASSA-PKCS#1 v1.5 + SHA-256）：内嵌公钥只用于验签 latest.json；
 # 私钥（%USERPROFILE%\.attachlink\release-key.xml）不入库、不进安装包，由 build\new-release-key.ps1 生成。
 # 更换密钥时同步替换 RELEASE_KEY_N（new-release-key.ps1 会打印新公钥与指纹），并用 --verify-manifest 复核。
+# 换钥记录：2026-11-26（v1.6.0 开发批次，该批次并入 2.0 分支、不单独发版）——原私钥文件丢失后重建，公钥指纹
+# e19ce2930c924fb6。v1.5.0 / v1.5.1 安装器内嵌的是旧公钥，验不过本密钥签发的清单（表现为「清单签名校验失败」、
+# 退出码 21，不会误装），需手动下载一次带新公钥的版本（2.0 系）安装器。
 RELEASE_KEY_N = (
-    "b1ff7be031d809fdcfc2d3c81d274cadce408b50ea98469685f15ab0316c410e4ceb8ddaddd3739433964bffdd12d1248"
-    "d37136fc49a041bb3e74ee3d955dccd8f0b38f2c60368faa3bf7b45fa281289d21ec70df835197da2c5236528bc5d259f"
-    "185f181a342515d0691c6cb2ff8df1805b07ef813650d795fc011634d800226ab1d9dd75d945b6c550c0da7f53f5d056"
-    "9474379c2a3d6e7107c9fcac9736371a83fb2505948f34b70920d19909a382bab3b911d9870fcc0a08d3fad30b207e24"
-    "14953b88a3d7f5102fb25f0628ba5fac2859e9aef41ddcbb26d8700ed919f77d00e05f6a9da67cb9314a18fc3331fff06"
-    "f22e6f11567fe5004f376bb905ef5"
+    "f1d9b7e3849b40e89a0ee77691584069b6d0833224f92011a41e9b841a1bdb05"
+    "873550ac9907baf916c0940410be8168e6639258398f5ae1d9d82f986d8b2abb"
+    "30f7329835e956bbaba0621266a221798c357da21eaecacf754585c98a379e21"
+    "e9e15315a53ff3800621a47734a8819ae925f02a871cc1831b8e16f192ae4d8b"
+    "86e77498389e49d15d97dd59230a0baffa9114ca29452003840b80f6f15a8ab2"
+    "dd0dfd46a221d2e916811587fbcf1d4daaaff04960c2bfb0f8e91996c980673e"
+    "3df9ebd38e3181c2b74691421178d1d258db8756a8a516180c8bc686a6d06b81"
+    "2f0f16f8715539d0c5b9d539af34e326b1d4a329a95e3957439de5d225b11dc9"
 )
 RELEASE_KEY_E = 65537
 SIG_ALG = "RS256-SHA256-PKCS1v15:v1"

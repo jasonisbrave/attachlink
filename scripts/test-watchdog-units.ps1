@@ -3,6 +3,9 @@
 # ---------------------------------------------------------------------
 # A. 看门狗装载判定（用假对象逐条覆盖，不依赖 Excel）：宿主里在位的副本是否就是看门狗配置的那一份，
 #    决定「能否执行初始化宏」。只有 trusted 才允许；查询出错不得当成「不在位」去打开第二份。
+#    v1.6.0（R1 只装载不登记）：装载只发生 Workbooks.Open，notfound 时断言没有任何 AddIns 写入
+#    （不 Add、不置 Installed）。v1.6.0（R2 在位判定加固）：Get-PresenceDecision 五结论逐条回归
+#    （notloaded / inplace / foreign / deadmenu / unknown）。
 #    A2 用假状态 + 受控时钟回归「隐藏文档窗口状态机」：读不到 Window.Visible 只延迟重试；重新评估只在真实的
 #    「不可见 → 可见」跳变时计数，用完后仍有低频重查——任何路径都不会让窗口被永久跳过。
 # B. 同名异路径副本（真实 Excel，隐藏实例）：宿主里装载了一份来自别处、没有宏的 AttachLink.xlam 时，
@@ -80,8 +83,8 @@ if ((-not $AssumeSameVersion) -and (Test-Path $pfWd)) { $deployedDiffers = ((Get
 
 # ---------------------------------------------------------------------
 '=== D. 路径比较与 Release-Com 容错（纯函数）==='
-$fnText = Get-FunctionsText $wdPath @('Release-Com', 'Test-SamePath', 'Get-LoadedAddInPath', 'Find-AddInIndex', 'Provision-App', 'New-WindowState', 'Get-HiddenDecision', 'Test-HiddenReevaluate')
-Check ($fnText.Contains('function Release-Com') -and $fnText.Contains('function Test-SamePath') -and $fnText.Contains('function Get-LoadedAddInPath') -and $fnText.Contains('function Provision-App') -and $fnText.Contains('function New-WindowState') -and $fnText.Contains('function Get-HiddenDecision') -and $fnText.Contains('function Test-HiddenReevaluate')) '取到 watchdog.ps1 的相关函数'
+$fnText = Get-FunctionsText $wdPath @('Release-Com', 'Test-SamePath', 'Get-LoadedAddInPath', 'Get-PresenceDecision', 'Remove-DeadMenuControls', 'Menu-Exists', 'Get-HostUiState', 'Restore-HostUiState', 'Provision-App', 'New-WindowState', 'Get-HiddenDecision', 'Test-HiddenReevaluate')
+Check ($fnText.Contains('function Release-Com') -and $fnText.Contains('function Test-SamePath') -and $fnText.Contains('function Get-LoadedAddInPath') -and $fnText.Contains('function Get-PresenceDecision') -and $fnText.Contains('function Remove-DeadMenuControls') -and $fnText.Contains('function Menu-Exists') -and $fnText.Contains('function Get-HostUiState') -and $fnText.Contains('function Restore-HostUiState') -and $fnText.Contains('function Provision-App') -and $fnText.Contains('function New-WindowState') -and $fnText.Contains('function Get-HiddenDecision') -and $fnText.Contains('function Test-HiddenReevaluate')) '取到 watchdog.ps1 的相关函数'
 . ([scriptblock]::Create($fnText))
 $XlamPath = 'C:\Program Files\AttachLink\AttachLink.xlam'      # A 段假对象场景用的「看门狗配置的那一份」
 $script:wdLog = New-Object System.Collections.Generic.List[string]
@@ -104,9 +107,13 @@ function New-FakeWorkbook([string]$Path, [switch]$PathThrows) {
     else { Add-Member -InputObject $o ScriptProperty FullName { $this.Path } -Force }
     return $o
 }
-function New-FakeApp([string]$Lookup, $LoadedWorkbook, [string]$OpenedPath, [switch]$OpenedPathThrows, $AddIn) {
+function New-FakeApp([string]$Lookup, $LoadedWorkbook, [string]$OpenedPath, [switch]$OpenedPathThrows, $AddIn, [bool]$Alerts = $true, [bool]$Screen = $true, [switch]$AlertsUnreadable, [switch]$OpenThrows) {
     # Lookup: 'found' | 'notfound' | 'error'  —— 模拟 Workbooks.Item('AttachLink.xlam') 的三种结果
     # Open 追踪：把每次 Open 的路径记到 $script:openedPaths
+    # 宿主界面设置：Alerts / Screen 是装载前的 DisplayAlerts / ScreenUpdating；Open 照 Excel 的真实行为把两项复位为 True
+    # （Workbook_Open 事件处理结束时发生，见 Get-HostUiState）；AlertsUnreadable 模拟读不到 DisplayAlerts（得到 $null，
+    # 且对它的写入被记入 UiWriteCalls——用来断言看门狗没有尝试写回读不到的项）；OpenThrows 模拟 Open 在事件
+    # 跑完、复位已发生之后抛错
     $wbs = [pscustomobject]@{}
     Add-Member -InputObject $wbs ScriptMethod Item {
         param($name)
@@ -122,6 +129,12 @@ function New-FakeApp([string]$Lookup, $LoadedWorkbook, [string]$OpenedPath, [swi
     Add-Member -InputObject $wbs ScriptMethod Open {
         param($path)
         [void]$script:openedPaths.Add([string]$path)
+        # Excel 的真实行为：Workbook_Open 事件处理结束时把宿主的 DisplayAlerts / ScreenUpdating 复位为 True
+        if ($null -ne $this.OwnerApp) {
+            if (-not $this.OwnerApp.AlertsUnreadable) { try { $this.OwnerApp.DisplayAlerts = $true } catch {} }
+            try { $this.OwnerApp.ScreenUpdating = $true } catch {}
+        }
+        if ($this.OpenThrows) { throw [System.Runtime.InteropServices.COMException]::new('被呼叫方拒绝接收呼叫。', [int]0x80010001) }
         if ($this.OpenedThrows) { return (New-FakeWorkbook '' -PathThrows) }
         return (New-FakeWorkbook $this.Opened)
     } -Force
@@ -129,21 +142,31 @@ function New-FakeApp([string]$Lookup, $LoadedWorkbook, [string]$OpenedPath, [swi
     Add-Member -InputObject $wbs NoteProperty Loaded $LoadedWorkbook -Force
     Add-Member -InputObject $wbs NoteProperty Opened $OpenedPath -Force
     Add-Member -InputObject $wbs NoteProperty OpenedThrows ([bool]$OpenedPathThrows) -Force
+    Add-Member -InputObject $wbs NoteProperty OpenThrows ([bool]$OpenThrows) -Force
     $app = [pscustomobject]@{}
     Add-Member -InputObject $app ScriptProperty Workbooks { $this.Wbs } -Force
     Add-Member -InputObject $app ScriptProperty AddIns { $this.Ains } -Force
+    if ($AlertsUnreadable) {
+        Add-Member -InputObject $app NoteProperty UiWriteCalls 0 -Force
+        Add-Member -InputObject $app -MemberType ScriptProperty -Name DisplayAlerts -Value { return $null } -SecondValue { $this.UiWriteCalls = [int]$this.UiWriteCalls + 1 } -Force
+    }
+    else { Add-Member -InputObject $app NoteProperty DisplayAlerts ([bool]$Alerts) -Force }
+    Add-Member -InputObject $app NoteProperty ScreenUpdating ([bool]$Screen) -Force
+    Add-Member -InputObject $app NoteProperty AlertsUnreadable ([bool]$AlertsUnreadable) -Force
     Add-Member -InputObject $app NoteProperty Wbs $wbs -Force
     Add-Member -InputObject $app NoteProperty Ains $AddIn -Force
+    Add-Member -InputObject $wbs NoteProperty OwnerApp $app -Force
     return $app
 }
 function New-FakeAddIns([string]$EntryPath, [bool]$Installed) {
-    # AddIns 集合：至多一个名为 AttachLink.xlam 的登记项
+    # AddIns 集合：至多一个名为 AttachLink.xlam 的登记项。AddCalls 记录 Add 被调用的次数
+    # ——R1（只装载不登记）后看门狗不得再碰 AddIns 集合，任何 Add 调用都是回归。
     $entry = $null
     if ($EntryPath) { $entry = [pscustomobject]@{ Name = 'AttachLink.xlam'; FullName = $EntryPath; Installed = $Installed } }
-    $ains = [pscustomobject]@{}
+    $ains = [pscustomobject]@{ AddCalls = 0 }
     Add-Member -InputObject $ains ScriptProperty Count { if ($this.Entry) { 1 } else { 0 } } -Force
     Add-Member -InputObject $ains ScriptMethod Item { param($i) if ($i -eq 1 -and $this.Entry) { return $this.Entry }; throw [System.Runtime.InteropServices.COMException]::new('无效索引。', [int]0x8002000B) } -Force
-    Add-Member -InputObject $ains ScriptMethod Add { param($p, $c) $this.Entry = [pscustomobject]@{ Name = 'AttachLink.xlam'; FullName = [string]$p; Installed = $false }; return $this.Entry } -Force
+    Add-Member -InputObject $ains ScriptMethod Add { param($p, $c) $this.AddCalls++; $this.Entry = [pscustomobject]@{ Name = 'AttachLink.xlam'; FullName = [string]$p; Installed = $false }; return $this.Entry } -Force
     Add-Member -InputObject $ains NoteProperty Entry $entry -Force
     return $ains
 }
@@ -175,16 +198,169 @@ Check ($r.ret -and $r.state -eq 'unknown' -and $r.opened.Count -eq 0) ('在位�
 $r = Invoke-Provision (New-FakeApp 'found' (New-FakeWorkbook $XlamPath) $XlamPath -AddIn (New-FakeAddIns $XlamPath $true))
 Check ($r.ret -and $r.state -eq 'trusted' -and $r.opened.Count -eq 0) '在位的就是配置的那份 → trusted，不重复打开'
 
-# AddIns 登记：只对「登记的就是配置路径」的条目置 Installed=True
+# R1 只装载不登记：notfound 时不得有任何 AddIns 写入（不 Add、不置 Installed），只发生 Workbooks.Open($XlamPath)
 $ainsForeign = New-FakeAddIns 'C:\Elsewhere\AttachLink.xlam' $false
 $r = Invoke-Provision (New-FakeApp 'notfound' $null $XlamPath -AddIn $ainsForeign)
-Check ($r.state -eq 'trusted' -and -not $ainsForeign.Entry.Installed) '登记在别处的同名条目：不被置为 Installed（不会让 Excel 从那个路径装载）'
+Check ($r.state -eq 'trusted' -and $r.opened.Count -eq 1 -and $r.opened[0] -eq $XlamPath -and -not $ainsForeign.Entry.Installed -and $ainsForeign.AddCalls -eq 0) '登记在别处的同名条目：不被置为 Installed、不新增登记（看门狗不碰 AddIns 集合）'
 $ainsMine = New-FakeAddIns $XlamPath $false
 $r = Invoke-Provision (New-FakeApp 'notfound' $null $XlamPath -AddIn $ainsMine)
-Check ($r.state -eq 'trusted' -and $ainsMine.Entry.Installed) '登记路径就是配置路径的条目：被置为 Installed'
+Check ($r.state -eq 'trusted' -and -not $ainsMine.Entry.Installed -and $ainsMine.AddCalls -eq 0) '登记路径就是配置路径的条目：也不被置为 Installed（登记位 ≠ 装载态，置位无装载效果且会写脏列表）'
 $ainsNone = New-FakeAddIns '' $false
 $r = Invoke-Provision (New-FakeApp 'notfound' $null $XlamPath -AddIn $ainsNone)
-Check ($r.state -eq 'trusted' -and $ainsNone.Entry -and $ainsNone.Entry.FullName -eq $XlamPath -and $ainsNone.Entry.Installed) '没有登记项：从配置路径新增登记并置为 Installed'
+Check ($r.state -eq 'trusted' -and $r.opened.Count -eq 1 -and $null -eq $ainsNone.Entry -and $ainsNone.AddCalls -eq 0) '没有登记项：不新增任何登记，只从配置路径装载'
+
+# 装载不留副作用（v1.6.0）：Excel 在 Workbook_Open 事件处理结束时会把宿主的 DisplayAlerts / ScreenUpdating 复位为 True
+# （2026-11-26 实测，任何带 Workbook_Open 的加载项都会触发；假对象的 Open 照此模拟）。看门狗装载后须恢复装载前的值——
+# 否则别的程序拉起的 Excel 里，被关掉的警告会重新打开，一个「是否替换」提示框就能把隐藏的自动化实例卡死（实测卡了 22 分钟）
+$st = Get-HostUiState ([pscustomobject]@{ DisplayAlerts = $false; ScreenUpdating = $false })
+Check ($st.alerts -eq $false -and $st.screen -eq $false) 'Get-HostUiState：读到宿主两项设置的原值'
+$uo = [pscustomobject]@{ DisplayAlerts = $true; ScreenUpdating = $true }
+Restore-HostUiState $uo $st
+Check ($uo.DisplayAlerts -eq $false -and $uo.ScreenUpdating -eq $false) 'Restore-HostUiState：把两项写回原值'
+$uo = [pscustomobject]@{ DisplayAlerts = $true; ScreenUpdating = $true }
+Restore-HostUiState $uo @{ alerts = $null; screen = $false }
+Check ($uo.DisplayAlerts -eq $true -and $uo.ScreenUpdating -eq $false) 'Restore-HostUiState：快照里没读到的项（$null）不写回'
+$threw = $false; try { Restore-HostUiState $uo $null } catch { $threw = $true }
+Check (-not $threw) 'Restore-HostUiState：快照为 $null 时不做任何事、不抛异常'
+$appUi = New-FakeApp 'notfound' $null $XlamPath -Alerts $false -Screen $false -AddIn (New-FakeAddIns '' $false)
+$r = Invoke-Provision $appUi
+Check ($r.state -eq 'trusted' -and $appUi.DisplayAlerts -eq $false -and $appUi.ScreenUpdating -eq $false) ('装载后宿主设置恢复原值：装载前两项均为 False → 装载后仍为 False；实际 DisplayAlerts=' + $appUi.DisplayAlerts + ' ScreenUpdating=' + $appUi.ScreenUpdating)
+$appUi = New-FakeApp 'notfound' $null $XlamPath -AddIn (New-FakeAddIns '' $false)
+$r = Invoke-Provision $appUi
+Check ($r.state -eq 'trusted' -and $appUi.DisplayAlerts -eq $true -and $appUi.ScreenUpdating -eq $true) '装载后宿主设置恢复原值：装载前两项均为 True（交互式会话的常态）→ 装载后仍为 True'
+$appUi = New-FakeApp 'notfound' $null $XlamPath -Alerts $false -AddIn (New-FakeAddIns '' $false)
+$r = Invoke-Provision $appUi
+Check ($r.state -eq 'trusted' -and $appUi.DisplayAlerts -eq $false -and $appUi.ScreenUpdating -eq $true) ('装载后宿主设置恢复原值：只关了警告 → 逐项恢复；实际 DisplayAlerts=' + $appUi.DisplayAlerts + ' ScreenUpdating=' + $appUi.ScreenUpdating)
+$appUi = New-FakeApp 'notfound' $null 'C:\Elsewhere\AttachLink.xlam' -Alerts $false -Screen $false -AddIn (New-FakeAddIns '' $false)
+$r = Invoke-Provision $appUi
+Check ($r.state -eq 'mismatch' -and $appUi.DisplayAlerts -eq $false -and $appUi.ScreenUpdating -eq $false) '打开后复核不符（mismatch）：复位已经发生，宿主设置照样恢复'
+$appUi = New-FakeApp 'notfound' $null $XlamPath -OpenedPathThrows -Alerts $false -Screen $false -AddIn (New-FakeAddIns '' $false)
+$r = Invoke-Provision $appUi
+Check ($r.state -eq 'mismatch' -and $appUi.DisplayAlerts -eq $false -and $appUi.ScreenUpdating -eq $false) '打开后路径读不到（mismatch）：宿主设置照样恢复'
+$appUi = New-FakeApp 'notfound' $null $XlamPath -OpenThrows -Alerts $false -Screen $false -AddIn (New-FakeAddIns '' $false)
+$r = Invoke-Provision $appUi
+Check ((-not $r.ret) -and $r.state -eq 'failed' -and $r.opened.Count -eq 1 -and $appUi.DisplayAlerts -eq $false -and $appUi.ScreenUpdating -eq $false) ('Workbooks.Open 中途抛错（事件可能已跑完、复位已发生）：装载判失败，宿主设置照样恢复；实际 state=' + $r.state + ' DisplayAlerts=' + $appUi.DisplayAlerts + ' ScreenUpdating=' + $appUi.ScreenUpdating)
+$appUi = New-FakeApp 'found' (New-FakeWorkbook $XlamPath) $XlamPath -Alerts $false -Screen $false -AddIn (New-FakeAddIns $XlamPath $true)
+$r = Invoke-Provision $appUi
+Check ($r.state -eq 'trusted' -and $r.opened.Count -eq 0 -and $appUi.DisplayAlerts -eq $false -and $appUi.ScreenUpdating -eq $false) '在位的就是配置的那份（不打开）：不碰宿主设置'
+$appUi = New-FakeApp 'notfound' $null $XlamPath -Alerts $false -Screen $false -AlertsUnreadable -AddIn (New-FakeAddIns '' $false)
+$r = Invoke-Provision $appUi
+Check ($r.state -eq 'trusted' -and $null -eq $appUi.DisplayAlerts -and $appUi.ScreenUpdating -eq $false -and $appUi.UiWriteCalls -eq 0) ('装载前读不到 DisplayAlerts（得到空值）：不臆测、不尝试写回该项（对它的写入次数须为 0，实际 ' + $appUi.UiWriteCalls + '），只恢复读得到的 ScreenUpdating')
+$wdTextUi = [IO.File]::ReadAllText($wdPath, [Text.Encoding]::UTF8)
+$iUiCapture = $wdTextUi.IndexOf('$uiState = Get-HostUiState $app')
+$iUiOpen = $wdTextUi.IndexOf('$wb = $wbs.Open($XlamPath)')
+$iUiRestore = $wdTextUi.IndexOf('Restore-HostUiState $app $uiState')
+Check ($iUiCapture -gt 0 -and $iUiOpen -gt $iUiCapture -and $iUiRestore -gt $iUiOpen) '装载不留副作用：Provision-App 在 Workbooks.Open 之前记录宿主设置、之后立即恢复'
+
+# Get-PresenceDecision 五结论（在位判定的纯函数，不碰 COM）
+Check ((Get-PresenceDecision $true 'found' $true) -eq 'inplace') '在位判定：菜单在位 + 在位的就是配置路径 → inplace'
+Check ((Get-PresenceDecision $true 'found' $false) -eq 'foreign') '在位判定：菜单在位 + 异路径同名副本 → foreign（维持不动）'
+Check ((Get-PresenceDecision $true 'notfound' $false) -eq 'deadmenu') '在位判定：菜单在位 + 加载项工作簿明确不在位 → deadmenu（命令栏缓存残留，按未装载处理）'
+Check ((Get-PresenceDecision $true 'error' $false) -eq 'unknown') '在位判定：菜单在位 + 查询出错 → unknown（不标 seen，下周期重试）'
+foreach ($ls in @('found', 'notfound', 'error')) {
+    Check ((Get-PresenceDecision $false $ls $false) -eq 'notloaded') ("在位判定：菜单不在位（lookupState=$ls）→ notloaded（走装载流程）")
+}
+
+# Remove-DeadMenuControls（死菜单根除：从外部删除 Cell 栏上带 AttachLinkCtx 标签的控件；假对象，不依赖 Excel）
+function New-FakeCellBar([string[]]$Tags, [int]$TagThrowsAt, [int]$DeleteThrowsAt, [switch]$CountNull) {
+    # $Tags：每个控件（下标从 1 起）的 Tag；$TagThrowsAt / $DeleteThrowsAt：读取 Tag / 删除时抛异常的下标（0 = 不抛）
+    $script:fakeDeletes = New-Object System.Collections.Generic.List[int]
+    $ctrls = [pscustomobject]@{}
+    Add-Member -InputObject $ctrls ScriptProperty Count { if ($this.CountNull) { return $null }; $this.Tags.Length } -Force
+    Add-Member -InputObject $ctrls ScriptMethod Item {
+        param($i)
+        if ($i -lt 1 -or $i -gt $this.Tags.Length) { throw [System.Runtime.InteropServices.COMException]::new('无效索引。', [int]0x8002000B) }
+        $c = [pscustomobject]@{ Index = [int]$i }
+        Add-Member -InputObject $c NoteProperty Owner $this -Force
+        if ([int]$i -eq $this.TagThrowsAt) {
+            # 「Tag 读不到」：按 PS 5.1 的真实表现建模——属性读取失败不上抛而是静默得到 $null（真实 Excel 里
+            # 无标签控件的 Tag 是空串 ""，所以看门狗可以用 $null 判「读不到」）
+            Add-Member -InputObject $c ScriptProperty Tag { return $null } -Force
+        } else {
+            Add-Member -InputObject $c NoteProperty Tag ([string]$this.Tags[[int]$i - 1]) -Force
+        }
+        Add-Member -InputObject $c ScriptMethod Delete {
+            if ($this.Index -eq $this.Owner.DeleteThrowsAt) { throw [System.Runtime.InteropServices.COMException]::new('被呼叫方拒绝接收呼叫。', [int]0x80010001) }
+            [void]$this.Owner.Deletes.Add($this.Index)
+        } -Force
+        return $c
+    } -Force
+    Add-Member -InputObject $ctrls NoteProperty Tags ([string[]]$Tags) -Force
+    Add-Member -InputObject $ctrls NoteProperty TagThrowsAt $TagThrowsAt -Force
+    Add-Member -InputObject $ctrls NoteProperty DeleteThrowsAt $DeleteThrowsAt -Force
+    Add-Member -InputObject $ctrls NoteProperty CountNull ([bool]$CountNull) -Force
+    Add-Member -InputObject $ctrls NoteProperty Deletes $script:fakeDeletes -Force
+    $bar = [pscustomobject]@{}
+    Add-Member -InputObject $bar ScriptProperty Controls { $this.Ctrls } -Force
+    Add-Member -InputObject $bar NoteProperty Ctrls $ctrls -Force
+    $bars = [pscustomobject]@{}
+    Add-Member -InputObject $bars ScriptMethod Item { param($n) if ($n -eq 'Cell') { return $this.Bar }; throw [System.Runtime.InteropServices.COMException]::new('无效索引。', [int]0x8002000B) } -Force
+    Add-Member -InputObject $bars NoteProperty Bar $bar -Force
+    $app = [pscustomobject]@{}
+    Add-Member -InputObject $app ScriptProperty CommandBars { $this.Bars } -Force
+    Add-Member -InputObject $app NoteProperty Bars $bars -Force
+    return $app
+}
+$appDm = New-FakeCellBar @('', 'AttachLinkCtx', '', 'AttachLinkCtx', '') 0 0
+$rDm = Remove-DeadMenuControls $appDm
+Check (($rDm -is [int]) -and $rDm -eq 2) ('死菜单根除：删除全部带标签的控件，返回删除个数；实际=' + $rDm)
+Check (($script:fakeDeletes -join ',') -eq '4,2') ('死菜单根除：倒序下标遍历（删除不影响未遍历部分的下标）；实际删除顺序=' + ($script:fakeDeletes -join ','))
+$appDm = New-FakeCellBar @('', 'Other', '') 0 0
+$rDm = Remove-DeadMenuControls $appDm
+Check (($rDm -is [int]) -and $rDm -eq 0 -and $script:fakeDeletes.Count -eq 0) '死菜单根除：没有带标签的控件 → 0，不删除任何控件'
+$appDm = New-FakeCellBar @('', 'Other', '', 'AttachLinkCtx', '') 4 0
+$rDm = Remove-DeadMenuControls $appDm
+Check (($rDm -is [int]) -and $rDm -eq -1 -and $script:fakeDeletes.Count -eq 0) ('死菜单根除：带标签的控件 Tag 读不到（宿主繁忙）→ 一个都没删成时不谎报「未找到」，返回 -1；实际=' + $rDm)
+$appDm = New-FakeCellBar @('', 'Other', 'x') 2 0
+$rDm = Remove-DeadMenuControls $appDm
+Check (($rDm -is [int]) -and $rDm -eq -1 -and $script:fakeDeletes.Count -eq 0) ('死菜单根除：无标签控件的 Tag 读不到、没有删任何控件 → 读不到的那个可能就是死菜单，返回 -1；实际=' + $rDm)
+$appDm = New-FakeCellBar @('', 'AttachLinkCtx', '', 'AttachLinkCtx', '') 0 4
+$rDm = Remove-DeadMenuControls $appDm
+Check (($rDm -is [int]) -and $rDm -eq 1 -and ($script:fakeDeletes -join ',') -eq '2') ('死菜单根除：单个控件删不掉 → 只跳过它，其余照删，只计成功数；实际=' + $rDm + ' 删除顺序=' + ($script:fakeDeletes -join ','))
+# 控件集合读不到 Count：PS 5.1 对名为 Count 的属性有特殊处理，getter 抛异常时不上抛而是静默得到空值（实测，
+# 同一轮里名为 Tag 的属性抛异常能被正常捕获），所以按「Count 取到空值」建模——看门狗必须显式判空，不能当成 0 个控件
+$script:fakeDeletes = New-Object System.Collections.Generic.List[int]
+$rDm = Remove-DeadMenuControls (New-FakeCellBar @('', 'AttachLinkCtx') 0 0 -CountNull)
+Check (($rDm -is [int]) -and $rDm -eq -1 -and $script:fakeDeletes.Count -eq 0) ('死菜单根除：控件集合读不到 Count（取到空值）→ -1，未删除任何控件；实际=' + $rDm)
+$appBusy = [pscustomobject]@{}
+Add-Member -InputObject $appBusy ScriptProperty CommandBars { throw [System.Runtime.InteropServices.COMException]::new('被呼叫方拒绝接收呼叫。', [int]0x80010001) } -Force
+$threw = $false; $rDm = $null
+try { $rDm = Remove-DeadMenuControls $appBusy } catch { $threw = $true }
+Check ((-not $threw) -and ($rDm -is [int]) -and $rDm -eq -1) ('死菜单根除：命令栏整体不可访问（宿主正忙）→ -1，不抛异常；实际=' + $rDm)
+$appNoBar = [pscustomobject]@{}
+Add-Member -InputObject $appNoBar ScriptProperty CommandBars { $this.Bars } -Force
+Add-Member -InputObject $appNoBar NoteProperty Bars ([pscustomobject]@{}) -Force
+$threw = $false; $rDm = $null
+try { $rDm = Remove-DeadMenuControls $appNoBar } catch { $threw = $true }
+Check ((-not $threw) -and ($rDm -is [int]) -and $rDm -eq -1) ('死菜单根除：取不到 Cell 命令栏 → -1，不抛异常；实际=' + $rDm)
+$wdAll = [IO.File]::ReadAllText($wdPath, [Text.Encoding]::UTF8)
+$iDmInit = $wdAll.IndexOf('$deadMenu = $false')
+$iDmFlag = $wdAll.IndexOf('$deadMenu = $true')
+$iDmPurge = $wdAll.IndexOf('$deadRemoved = Remove-DeadMenuControls $app')
+$iDmProv = $wdAll.IndexOf('if (Provision-App $app) {')
+Check ($iDmInit -gt 0 -and $iDmFlag -gt $iDmInit -and $iDmPurge -gt $iDmFlag -and $iDmProv -gt $iDmPurge) '死菜单根除：主循环在每个窗口先复位 $deadMenu，deadmenu 结论之后、装载之前调用 Remove-DeadMenuControls'
+
+# Menu-Exists：读不到 ≠ 不在位（v1.6.0，oracle 复核建议）。控件数读不到时直接抛异常；控件的 Tag 读不到时先记下继续扫，
+# 没找到带标签控件才抛异常——都交给主循环的「附着失败（退避重试）」，不能当成「0 个控件 / 无标签」返回 $false，
+# 否则已在运行的会话会被当成未装载再装载、初始化一次；而遇到第一个读不到的控件就抛，菜单明明在位也会永远装载不上
+$threw = $false; $rMe = 'unset'
+try { $rMe = Menu-Exists (New-FakeCellBar @('', 'AttachLinkCtx', '') 0 0) } catch { $threw = $true }
+Check (-not $threw -and $rMe -eq $true) 'Menu-Exists：带标签控件在位 → $true'
+$threw = $false; $rMe = 'unset'
+try { $rMe = Menu-Exists (New-FakeCellBar @('', 'Other', '') 0 0) } catch { $threw = $true }
+Check (-not $threw -and $rMe -eq $false) 'Menu-Exists：没有带标签的控件 → $false'
+$threw = $false; $rMe = 'unset'
+try { $rMe = Menu-Exists (New-FakeCellBar @('', 'Other', '') 0 0 -CountNull) } catch { $threw = $true }
+Check ($threw -and $rMe -eq 'unset') 'Menu-Exists：控件数读不到（空值）→ 抛异常，不当成 0 个控件返回 $false'
+$threw = $false; $rMe = 'unset'
+try { $rMe = Menu-Exists (New-FakeCellBar @('', 'Other', 'x') 2 0) } catch { $threw = $true }
+Check ($threw -and $rMe -eq 'unset') 'Menu-Exists：某个控件的 Tag 读不到（空值）且没有带标签控件 → 抛异常，不当成无标签放过'
+$threw = $false; $rMe = 'unset'
+try { $rMe = Menu-Exists (New-FakeCellBar @('Other', 'x', 'AttachLinkCtx') 2 0) } catch { $threw = $true }
+Check (-not $threw -and $rMe -eq $true) 'Menu-Exists：读不到的控件排在带标签控件之前、菜单在位 → 仍判在位（扫完再判，不因个别控件读不到而永远装载不上；旧的「遇到即抛」实现在此会抛异常）'
+$threw = $false; $rMe = 'unset'
+try { $rMe = Menu-Exists ([pscustomobject]@{}) } catch { $threw = $true }
+Check ($threw -and $rMe -eq 'unset') 'Menu-Exists：命令栏整体取不到 → 异常原样抛给主循环'
 
 # Get-LoadedAddInPath 三态
 $p = Get-LoadedAddInPath ([pscustomobject]@{}) 'AttachLink.xlam'

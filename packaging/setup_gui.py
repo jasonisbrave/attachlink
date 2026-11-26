@@ -31,6 +31,7 @@ from setup_actions import (
     save_log_beside_exe,
     standard_install,
     uninstall,
+    _log_beside_dir,
 )
 
 # 界面用色令牌：绿色主按钮、状态三色（✓ ⚠ ✗）、灰阶说明文字、更新提示条的琥珀底色
@@ -46,6 +47,13 @@ BANNER_BORDER = "#e3d0a0"
 BANNER_TEXT = "#7a5d00"
 LINK_BLUE = "#0b5cad"
 PROGRESS_PREFIX = "【进度】"   # apply_update 推送的进度行前缀：`【进度】已下载\t总大小\t百分比%`
+
+
+def save_gui_log_snapshot(text: str, extra_note: str = "") -> str:
+    """界面收尾统一的日志快照另存：交接模式（--updated-from）写到旧安装器所在目录——
+    新安装器由交接从 %TEMP% 更新临时目录启动，快照写在那里用户看不到；无交接参数或旧目录
+    不存在时回落 exe 所在目录。不依赖 Tk 窗口，三个收尾路径都走这里，避免调用点漂移。"""
+    return save_log_beside_exe(text, extra_note, target_dir=_log_beside_dir())
 
 
 class App:
@@ -499,7 +507,7 @@ class App:
         self._hide_banner()
         if result.hint == "EXIT_AFTER":
             # 交接成功：日志快照照常保存，不弹任何框直接关窗；新版本安装器的窗口接着出现
-            save_log_beside_exe(self.logbox.get("1.0", "end-1c"))
+            save_gui_log_snapshot(self.logbox.get("1.0", "end-1c"))
             self.status.configure(text="✓ " + result.title, foreground=STATUS_OK)
             self.root.destroy()
             return
@@ -507,7 +515,7 @@ class App:
             # 更新流程里发现已是最新：与检查更新同样处理，只更新状态栏不弹框
             self.status.configure(text=f"✓ {result.title} v{self.ver}", foreground=STATUS_OK)
             return
-        beside = save_log_beside_exe(self.logbox.get("1.0", "end-1c"))
+        beside = save_gui_log_snapshot(self.logbox.get("1.0", "end-1c"))
         log_where = (
             "日志已保存到安装器所在文件夹：\n" + beside
             if beside
@@ -517,7 +525,7 @@ class App:
         messagebox.showerror(APP_TITLE, result.dialog_text(log_where), parent=self.root)
 
     def _finish_dialog(self, result: ActionResult) -> None:
-        beside = save_log_beside_exe(self.logbox.get("1.0", "end-1c"))
+        beside = save_gui_log_snapshot(self.logbox.get("1.0", "end-1c"))
         log_where = (
             "日志已保存到安装器所在文件夹：\n" + beside
             if beside

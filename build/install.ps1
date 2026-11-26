@@ -126,6 +126,7 @@ $officeVersions = @('16.0', '15.0', '14.0')
 #   Options\OPENn     已启用的条目；库目录副本只存文件名，其他路径存带引号的完整路径，禁用的带 /A 前缀
 #   Add-in Manager    显式添加过、未启用的非库目录副本，值名即完整路径（已启用的条目被置 Installed=False
 #                     后，退出时就从 OPENn 挪到这里）
+# （历史根因：v1.6.0 起看门狗只装载、不再登记，下面这条链路不再发生；但清理逻辑对 v1.6.0 之前留下的存量登记仍然必要）
 # 机器级看门狗把 Program Files 副本 AddIns.Add 进列表并置 Installed 的会话退出后，OPENn 里就多了一条指向
 # 那份副本的登记；卸载的第一步（Installed=False）让它挪进 Add-in Manager，文件随后被机器级卸载删除——
 # 成了悬空登记。之后用户级安装的 AddIns.Add 就绑定到它、Installed 置位静默失败（「卸载后重装」失败的

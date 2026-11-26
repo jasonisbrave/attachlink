@@ -4,6 +4,9 @@
 # 场景：用 COM 自动化（CreateObject）拉起 Excel——精确复刻鼎信诺的启动
 # 方式（跳过一切加载项初始化），再由看门狗完成外部装载。验证：
 #   基线（装载前右键菜单不存在） → 看门狗附着 → 菜单 Tag 在位 → SelfTest
+#   → 会话内已装载（在位副本路径 = 配置路径；v1.6.0 R1 起不再要求 AddIn Installed）
+#   → 登记零差异（实例退出后，HKCU OPEN/OPENn 与 Add-in Manager 的 AttachLink 相关值
+#     与测试前完全一致；实例内 AddIns 的 Installed 不被看门狗改动）
 #   → 关后即退（被测看门狗全程存活；Quit 后脚本仍持着引用 5 秒）
 #   → 预热生命周期（被测看门狗空转 50 秒后再附着）
 # 用法：powershell -ExecutionPolicy Bypass -File test-chain.ps1
@@ -76,6 +79,52 @@ function Get-AddInInstalled($app) {
     } catch { $result = $null } finally { Release-Com $addins }
     return $result
 }
+function Get-SessionLoadedPath($wbs) {
+    # 会话内装载判定（v1.6.0 R1）：按名字取 AttachLink.xlam 工作簿，返回其完整路径；
+    # 不在位 / 路径读不到返回 $null。取到的工作簿读完即释放（不依赖 GC）。
+    $w = $null
+    try { $w = $wbs.Item('AttachLink.xlam'); return [string]$w.FullName } catch { return $null } finally { Release-Com $w }
+}
+function Read-HostUiState($app) {
+    # 读宿主的 DisplayAlerts / ScreenUpdating。宿主正忙时（例如看门狗正在装载）COM 调用会被拒绝：
+    # 重试几次；仍读不到返回 $null——调用方必须按「读不到」处理，不能当成 True 或 False。
+    for ($k = 0; $k -lt 8; $k++) {
+        try {
+            $alertsValue = $app.DisplayAlerts
+            $screenValue = $app.ScreenUpdating
+            if ($null -ne $alertsValue -and $null -ne $screenValue) { return @{ alerts = [bool]$alertsValue; screen = [bool]$screenValue } }
+        } catch {}
+        Start-Sleep -Milliseconds 150
+    }
+    return $null
+}
+function Get-AttachLinkRegistrySnapshot {
+    # 加载项列表登记的「与 AttachLink 相关」快照（名称+数据，排序后比对，只读）：
+    # HKCU 各 Office 版本 Excel\Options 的 OPEN/OPENn 中含 AttachLink 的值，
+    # 以及同级 Add-in Manager 下名字含 AttachLink 的值。R1（只装载不登记）验收：
+    # 看门狗装载过的实例退出后，此处必须与测试前完全一致（WORKLOG #30 的登记残留被绕开）。
+    $snap = New-Object System.Collections.Generic.List[string]
+    foreach ($ver in @('16.0', '15.0', '14.0')) {
+        $optKey = "HKCU:\Software\Microsoft\Office\$ver\Excel\Options"
+        if (Test-Path $optKey) {
+            foreach ($p in (Get-ItemProperty -LiteralPath $optKey).PSObject.Properties) {
+                if ($p.Name -match '^OPEN(\d+)?$' -and $p.Value -is [string] -and $p.Value -match 'AttachLink') {
+                    $snap.Add("OPT $ver $($p.Name)=[$($p.Value)]")
+                }
+            }
+        }
+        $amKey = "HKCU:\Software\Microsoft\Office\$ver\Excel\Add-in Manager"
+        if (Test-Path $amKey) {
+            foreach ($n in (Get-Item -LiteralPath $amKey).GetValueNames()) {
+                if ($n -match 'AttachLink') {
+                    $v = (Get-ItemProperty -LiteralPath $amKey -Name $n).$n
+                    $snap.Add("AM $ver [$n]=[$v]")
+                }
+            }
+        }
+    }
+    return @($snap | Sort-Object)
+}
 function Save-AllWorkbooks($wbs) {
     # 按下标遍历（不产生枚举器），标记为已保存，免得 Quit 时弹保存提示
     $n = 0
@@ -121,13 +170,21 @@ if ($AssumeSameVersion) {
     '***        只有在常驻看门狗已暂停时才有意义；它在运行的话，下面的结果无法归因于被测脚本。'
 }
 
-$menu = $false; $installed = $null; $pinOk = $true; $warmOk = $true
+$menu = $false; $installed = $null; $sessionLoaded = $false; $loadedPath = $null; $selfTestOk = $false
+$pinOk = $true; $warmOk = $true; $regOk = $true; $installedUntouched = $true; $installedBefore = $null; $hostUiUntouched = $true; $hostUiPreloaded = $false; $hostUiRace = $false; $hostUiLoadedEarly = $false
+$snapBefore = Get-AttachLinkRegistrySnapshot          # 登记零差异（R1）的「前」快照：实例创建之前
 $wd = $null; $wd2 = $null; $log1 = $null; $log2 = $null
 $xl = $null; $wbs = $null; $testPid = [uint32]0
 $xl2 = $null; $wbs2 = $null; $pid2 = [uint32]0
 try {
     '[1] COM 自动化拉起 Excel（复刻鼎信诺启动方式，跳过加载项初始化）'
     $xl = New-Object -ComObject Excel.Application
+    # 宿主界面设置（R1「装载不留副作用」的断言用）：模拟别的程序拉起 Excel 后自己关掉了警告与屏幕刷新。必须在出现
+    # 工作簿窗口【之前】设——零工作簿实例没有 EXCEL7 窗口，看门狗此时不可能附着；这样看门狗之后的任何快照都晚于
+    # 这里的设置，从构造上排除「带着设置之前的快照装载、再把旧值恢复回去」的竞态（2026-11-26 实测遇到过一次）。
+    # Excel 在加载项的 Workbook_Open 事件处理结束时会把这两项一律复位为 True，看门狗装载后必须恢复成这里的原值（[4] 断言）。
+    $xl.DisplayAlerts = $false
+    $xl.ScreenUpdating = $false
     $xl.Visible = $true
     $wbs = $xl.Workbooks                                   # 零工作簿实例没有 EXCEL7 窗口，先建一个
     $wb = $wbs.Add()
@@ -163,12 +220,31 @@ try {
             $baseline = $false
         } elseif ($wbState -eq 'found') {
             "    baseline menu = True（机器级看门狗抢先装载所致，属预期竞态，不影响结论）"
+            $hostUiPreloaded = $true      # 加载项在基线检查时已由机器级看门狗装载：两项设置早于窗口出现、快照必然晚于设置，[4] 照常断言（输出里注明）
         } else {
             "    无法确认在位情况（Workbooks.Item 返回 0x{0:X8}），按已有菜单继续" -f $hr
         }
     } else {
         "    baseline menu = False"
     }
+
+    # 测试前读一次登记位（R1 断言：看门狗不再改它；登记位 ≠ 装载态，只作对照不做装载判据）
+    $installedBefore = Get-AddInInstalled $xl
+
+    # 宿主界面设置已在 [1] 建实例时、出现工作簿窗口之前设好。这里观察最多 6 秒：若这期间加载项由机器级常驻看门狗
+    # 装载完成，这次装载就是有效证据的来源（它的快照必然晚于设置）；6 秒内没人来装载，则由 [3] 启动的被测看门狗来装载。
+    # 两项在装载后是否保持原值，统一由 [4] 判定。
+    $settleUntil = (Get-Date).AddSeconds(6)
+    $uiReads = 0
+    while ((Get-Date) -lt $settleUntil) {
+        Start-Sleep -Milliseconds 300
+        $uiNow = Read-HostUiState $xl
+        if ($null -eq $uiNow) { continue }        # 宿主正忙读不到（多半是看门狗在装载）：下一轮再看
+        $uiReads++
+        if (Get-SessionLoadedPath $wbs) { $hostUiLoadedEarly = $true; break }
+    }
+    if ($uiReads -eq 0) { $hostUiRace = $true }    # 整个观察窗口一次都没读到（宿主一直忙）：无法确认设置是否生效，按没有判别力处理
+    "    观察窗口：成功读取 $uiReads 次；由常驻看门狗在窗口内装载=$hostUiLoadedEarly"
 
     '[3] 启动被测看门狗（独立日志，运行到本测试结束；本机若有同版本常驻看门狗，[4] 的装载可能由它先完成——[1]~[6] 验证的是「看门狗机制能装载并释放」，被测脚本自身的归因由 [6] / [7] 负责）'
     # 被测看门狗与机器级常驻看门狗必须用同一份 xlam：二者会在 1 秒内先后附着同一实例，若各带一份不同的同名副本，
@@ -178,19 +254,46 @@ try {
 
     '[4] 轮询验证菜单与装载状态（最多 25 秒）'
     $deadline = (Get-Date).AddSeconds(25)
-    while ((Get-Date) -lt $deadline -and -not $menu) {
+    while ((Get-Date) -lt $deadline -and -not ($menu -and $sessionLoaded)) {
         Start-Sleep -Milliseconds 1000
         try {
             $menu = Test-Menu $xl
+            $loadedPath = Get-SessionLoadedPath $wbs
             $installed = Get-AddInInstalled $xl
+            if ($loadedPath -and ($loadedPath -ieq $trustedXlam)) { $sessionLoaded = $true }
         } catch { Start-Sleep -Milliseconds 500 }
     }
-    "    AddIn Installed = $installed"
+    $installedAfter = $installed
+    "    会话内已装载（在位副本 = 配置路径）= $sessionLoaded" + $(if ($loadedPath) { "（在位路径: $loadedPath）" } else { "（尚未取到在位副本）" })
+    "    AddIn Installed（登记位，看门狗不应改动）: 测试前 = $installedBefore，装载后 = $installedAfter"
     "    右键菜单 Tag 在位 = $menu"
+
+    # 装载前后宿主的 DisplayAlerts / ScreenUpdating 必须不变（上面已设为 False）：看门狗须恢复原值——否则别的
+    # 程序关掉的警告会被重新打开，一个「是否替换」提示框就能把隐藏的自动化实例卡死（实测卡了 22 分钟，WORKLOG #34）
+    if ($deployedDiffers) {
+        '    SKIP 宿主设置检查：机器级常驻看门狗与被测脚本版本不一致（装载可能由它完成），请先重新部署'
+    } elseif ($hostUiRace) {
+        '    SKIP 宿主设置检查：设置后的 6 秒观察窗口内一次都没能读到宿主设置（宿主一直忙），无法确认设置是否生效'
+    } else {
+        $uiAfter = Read-HostUiState $xl
+        if ($null -eq $uiAfter) {
+            '    SKIP 宿主设置检查：装载后读不到宿主设置（宿主正忙），本断言没有判别力'
+        } else {
+            $hostAlerts = $uiAfter.alerts; $hostScreen = $uiAfter.screen
+            "    装载后宿主 DisplayAlerts=$hostAlerts ScreenUpdating=$hostScreen（建实例时、出现工作簿窗口之前均设为 False）" + $(if ($hostUiPreloaded) { '（基线检查前已由机器级常驻看门狗装载）' } elseif ($hostUiLoadedEarly) { '（由机器级常驻看门狗装载）' } else { '' })
+            if ($hostAlerts -eq $false -and $hostScreen -eq $false) {
+                '    pass: 装载前后宿主的 DisplayAlerts / ScreenUpdating 不变（看门狗恢复原值，不把宿主关掉的警告重新打开）'
+            } else {
+                $hostUiUntouched = $false
+                "    FAIL: 看门狗装载后宿主设置被改动（DisplayAlerts=$hostAlerts ScreenUpdating=$hostScreen，装载前均为 False）"
+            }
+        }
+    }
 
     if ($menu) {
         '[5] 冒烟：在目标实例中运行 SelfTest'
         $t = $xl.Run('AttachLink_SelfTest')
+        $selfTestOk = [bool]$t
         "    AttachLink_SelfTest = $t"
     }
 
@@ -234,6 +337,23 @@ try {
         }
         Close-TestInstance $xl $wbs $testPid      # FAIL / 异常路径的兜底：正常路径上 $xl 已为 $null，只做残留清理
         $xl = $null; $wbs = $null
+
+        # ---- R1 只装载不登记：实例已退出（登记此刻落盘），加载项列表必须与测试前完全一致 ----
+        $snapAfter6 = Get-AttachLinkRegistrySnapshot
+        $regDiff = @(Compare-Object $snapBefore $snapAfter6)
+        if ($regDiff.Count -eq 0) {
+            '    pass: 登记零差异（实例退出后，OPEN/OPENn 与 Add-in Manager 的 AttachLink 相关值与测试前完全一致）'
+        } else {
+            $regOk = $false
+            '    FAIL: 装载会话退出后加载项列表发生变动（看门狗应只装载不登记，WORKLOG #30 残留应被绕开）：'
+            $regDiff | ForEach-Object { '      ' + $_.InputObject }
+        }
+        if ($installedBefore -eq $installedAfter) {
+            "    pass: 实例内 AddIns 的 Installed 未被看门狗改动（$installedBefore → $installedAfter）"
+        } else {
+            $installedUntouched = $false
+            "    FAIL: 实例内 AddIns 的 Installed 被改动（$installedBefore → $installedAfter）——看门狗不应再碰登记"
+        }
     }
     if ($wd -and -not $wd.HasExited) { try { Stop-Process -Id $wd.Id -Force } catch {} }
     Remove-Item $log1 -Force -ErrorAction SilentlyContinue
@@ -281,6 +401,17 @@ try {
         }
         Close-TestInstance $xl2 $wbs2 $pid2      # FAIL 路径的兜底；正常路径上 $xl2 已为 $null
         $xl2 = $null; $wbs2 = $null
+
+        # R1 终态复核：预热实例也已退出，加载项列表仍须与测试前一致
+        $snapFinal = Get-AttachLinkRegistrySnapshot
+        $regDiffF = @(Compare-Object $snapBefore $snapFinal)
+        if ($regDiffF.Count -eq 0) {
+            '    pass: 终态登记零差异（预热实例退出后，AttachLink 相关登记仍与测试前完全一致）'
+        } else {
+            $regOk = $false
+            '    FAIL: 预热实例退出后加载项列表发生变动（看门狗应只装载不登记）：'
+            $regDiffF | ForEach-Object { '      ' + $_.InputObject }
+        }
     }
 } finally {
     '--- 清理 ---'
@@ -290,4 +421,4 @@ try {
     # 提前终止时 $log2 可能尚未赋值：先滤掉空值，否则 Remove-Item 会报参数绑定错误（-ErrorAction 管不住）
     Remove-Item (@($log1, $log2) | Where-Object { $_ }) -Force -ErrorAction SilentlyContinue
 }
-if ($menu -and $installed -and $pinOk -and $warmOk) { "RESULT: PASS"; exit 0 } else { "RESULT: FAIL"; exit 1 }
+if ($menu -and $sessionLoaded -and $selfTestOk -and $pinOk -and $warmOk -and $regOk -and $installedUntouched -and $hostUiUntouched) { "RESULT: PASS"; exit 0 } else { "RESULT: FAIL"; exit 1 }

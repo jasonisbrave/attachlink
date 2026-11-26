@@ -7,9 +7,20 @@
 #
 # 机制：周期性枚举 Excel 的 EXCEL7 文档窗口（XLMAIN 的子窗口），通过
 # oleacc!AccessibleObjectFromWindow(OBJID_NATIVEOM, IID_IDispatch) 取得
-# 该窗口的 Excel Window 对象 → .Application → Workbooks.Open(xlam) 强制装载
-# → 显式 Run 初始化 → 验证右键菜单 Tag 在位。该通道是微软文档化的
+# 该窗口的 Excel Window 对象 → .Application → 按名核对在位副本 →
+# Workbooks.Open(xlam) 强制装载（只装载、不登记，见下）→ 显式 Run 初始化
+# → 验证右键菜单 Tag 在位。该通道是微软文档化的
 # Office Native OM 附着方式，不依赖 ROT、不注入。
+#
+# 只装载、不登记（v1.6.0）：装载动作只有 Workbooks.Open，不触碰 AddIns 集合。
+# 原因：① 自动化实例里 Installed=True 只是登记位、从不产生装载效果（本机实测，
+# 登记了也「从未装载」）；② 登记会在宿主退出时把 OPENn / Add-in Manager 写脏
+# （WORKLOG #30），是纯粹的状态污染。切换后会话内装载功能不变、加载项列表零差异
+# （技术预研 docs\AttachLink技术预研-看门狗只装载不登记可行性.md）。用户级安装
+# （install.ps1）的 OPENn 登记是交互式 Excel 启动装载的设计通道，不在此列、不受影响。
+# 装载不留副作用（v1.6.0）：打开加载项会触发它的 Workbook_Open，Excel 在该事件处理结束时会把宿主的
+# DisplayAlerts / ScreenUpdating 复位为 True；看门狗装载前记下原值、装载后恢复（Get-HostUiState /
+# Restore-HostUiState），不把宿主（别的程序）关掉的警告重新打开。
 #
 # 时序说明：零工作簿实例没有 EXCEL7 窗口，自然不会附着；鼎信诺打开底稿
 # （出现工作簿窗口）后下个周期自动完成装载——时机恰好。
@@ -28,9 +39,20 @@
 # 内存里不退（2026-11-23 实测；疑与「关了 Excel 仍提示在运行」「重开连回旧进程」
 # 类现象同源，见 WORKLOG #27）。
 #
-# 已在位即不动（v1.4.3）：取得 Application 后先看右键菜单是否已在位——在位说明加载项
-# 已随宿主正常启动装载（OPENn），直接标记完成，不再 Open / Run。安装器默认部署看门狗
-# 之后，这是普通双击打开的 Excel 会话的常态。
+# 已在位即不动（v1.6.0 加固）：右键菜单 Tag 在位不可反推装载态——Excel 会把非临时的
+# 内置命令栏控件在正常退出时写入 %APPDATA%\Microsoft\Excel\Excel15.xlb，此后每个新实例
+# 都带着它启动；残留的 AttachLinkCtx 控件形成「死菜单」（菜单在位、加载项工作簿 notfound，
+# 旧版据此判「已在位」而漏装载，2026-11-24 受控复现）。因此菜单在位后再用 Workbooks 三态
+# 确认加载项工作簿：在位的就是 $XlamPath 才算「已在位」；在位的是异路径同名副本则维持不动；
+# 明确 notfound（死菜单）按未装载处理：装载前先由看门狗【从外部】删除残留控件（根除——实测非临时控件在
+# Workbook_Open 里被加载项删除后，实例正常退出时仍会被写回缓存，死菜单会在每个新实例重现；外部删除 +
+# 正常退出才真正清缓存），再打开配置路径副本并初始化；
+# 查询出错不动作、不标 seen、下周期重试（日志限频，避免宿主繁忙时刷日志）。判定集中在纯函数
+# Get-PresenceDecision 里，由 scripts\test-watchdog-units.ps1 的假对象用例逐条回归。
+# 两级都装的机器上，普通双击 Excel 的会话由用户级登记装载的是库目录副本（%APPDATA%\Microsoft\AddIns），
+# 而看门狗配置的是 Program Files 副本——这类会话的判定是 foreign（在位的是异路径同名副本：同样标记完成、
+# 不 Open、不 Run），每个交互式会话会记一行「已在位，无需装载 … 在位副本=…」，属正常；只有看门狗自己
+# 装载过的会话、或只装了机器级的机器上，普通会话的判定才是 inplace。
 #
 # 对短命的隐藏自动化实例保持克制（v1.4.3）：不可见实例首次出现时宽限一个周期再处理；宿主里
 # 已有同名加载项工作簿时不再打开第二份。各类工具 / 测试脚本常自己装载另一份同名加载项，
@@ -231,21 +253,6 @@ function Release-Com($obj) {
     try { while ([System.Runtime.InteropServices.Marshal]::ReleaseComObject($obj) -gt 0) { } } catch {}
 }
 
-function Find-AddInIndex($addins) {
-    # 在 AddIns 集合里按 Name 定位 AttachLink.xlam（返回 1 起的下标，找不到返回 0）。
-    # 用下标遍历而非 foreach：不产生需要回收的枚举器；每个 AddIn 对象查完即释放——释放放在 finally 里，
-    # 属性读取抛异常（宿主繁忙 / RPC 拒绝）时同样不漏。
-    $n = [int]$addins.Count
-    for ($i = 1; $i -le $n; $i++) {
-        $ai = $null
-        try {
-            $ai = $addins.Item($i)
-            if ($ai.Name -ieq 'AttachLink.xlam') { return $i }
-        } finally { Release-Com $ai }
-    }
-    return 0
-}
-
 function Get-LoadedAddInPath($wbs, $name) {
     # 取「当前已在位的、名为 $name 的加载项工作簿」的完整路径，读完立即释放。
     # 必须按名字取：Excel 的 Workbooks 集合不按序号枚举加载项工作簿（Count 不含它们，1..Count 遍历不到），
@@ -273,6 +280,23 @@ function Get-LoadedAddInPath($wbs, $name) {
 
 function Test-SamePath($a, $b) {
     try { return ([IO.Path]::GetFullPath($a) -ieq [IO.Path]::GetFullPath($b)) } catch { return $false }
+}
+
+function Get-PresenceDecision([bool]$menuExists, [string]$lookupState, [bool]$samePath) {
+    # 在位判定的纯函数（不碰 COM），主循环在菜单 Tag 在位时结合 Get-LoadedAddInPath 的三态调用它分流。
+    # 参数：$menuExists = 右键菜单 Tag 是否在位；$lookupState = Workbooks 三态查询结果
+    # （found / notfound / error，见 Get-LoadedAddInPath）；$samePath = 在位副本路径是否就是 $XlamPath。
+    # 返回五种结论之一：
+    #   notloaded = 菜单不在位 → 直接走装载流程（无论三态如何，此时尚未做三态查询）
+    #   inplace   = 菜单在位且在位的就是 $XlamPath → 标记完成，不再 Open / Run
+    #   foreign   = 菜单在位但在位的是异路径同名副本 → 维持现状不动它（与 Provision-App 同一纪律）
+    #   deadmenu  = 菜单在位但加载项工作簿明确 notfound（命令栏缓存残留的「死菜单」）→ 按未装载走装载流程
+    #               （主循环先调用 Remove-DeadMenuControls 从外部删除残留控件，再装载；原因见该函数的说明）
+    #   unknown   = 菜单在位但三态查询出错 / 路径读不到 → 不标 seen，下周期重试
+    if (-not $menuExists) { return 'notloaded' }
+    if ($lookupState -eq 'found') { if ($samePath) { return 'inplace' } else { return 'foreign' } }
+    if ($lookupState -eq 'notfound') { return 'deadmenu' }
+    return 'unknown'
 }
 
 # ---- 隐藏文档窗口的状态机 ----
@@ -327,13 +351,36 @@ function Test-HiddenReevaluate($st, [bool]$shownNow, $now, [int]$maxReeval, [int
     return $true
 }
 
+function Get-HostUiState($app) {
+    # 宿主两项界面设置的原值快照（看门狗装载前调用）。
+    # Excel 在 Workbook_Open 事件处理结束时会把 DisplayAlerts / ScreenUpdating 一律复位为 True（2026-11-26 实测：
+    # 处理过程里读到的还是原值、在处理里再设一次也无济于事；任何带 Workbook_Open 的加载项都会触发，与
+    # AttachLink 的代码无关）。看门狗把加载项装进别的程序拉起的 Excel 之后，宿主关掉的警告会被重新打开——
+    # 随后的覆盖保存、删表等操作一旦弹框，隐藏的自动化实例就卡死（实测一次卡了 22 分钟，直到有人关掉那个
+    # 「是否替换」）。所以装载前记下原值、装载后恢复（Restore-HostUiState）。读不到的项保持 $null，恢复时跳过。
+    $alerts = $null; $screen = $null
+    try { $alerts = $app.DisplayAlerts } catch {}
+    try { $screen = $app.ScreenUpdating } catch {}
+    return @{ alerts = $alerts; screen = $screen }
+}
+
+function Restore-HostUiState($app, $state) {
+    # 把宿主的 DisplayAlerts / ScreenUpdating 恢复成装载前的值（Get-HostUiState 的快照）；快照为 $null 或某项
+    # 没读到时不恢复该项。直接写回、不先比较：读当前值若静默失败（PS 5.1 下属性读取失败可能得到空值而
+    # 不上抛）会误判成「已一致」。
+    if ($null -eq $state) { return }
+    if ($null -ne $state.alerts) { try { $app.DisplayAlerts = [bool]$state.alerts } catch {} }
+    if ($null -ne $state.screen) { try { $app.ScreenUpdating = [bool]$state.screen } catch {} }
+}
+
 function Provision-App($app) {
-    # 登记装载（幂等）。注意：AddIns 集合的 Installed=True 只反映登记状态，
-    # 自动化实例可能「已登记勾选但从未装载」（本机实测根因）。真正的强制
-    # 装载靠下方 Workbooks.Open：xlam 为 IsAddin 工作簿，Open 无可见窗口、
-    # 不切换用户活动窗口；已装载时 Open 返回现有工作簿，无副作用。
+    # 只装载、不登记（v1.6.0，R1）。AddIns 集合的 Installed=True 只是登记位，
+    # 自动化实例可能「已登记勾选但从未装载」（本机实测根因），登记对装载没有任何效果；
+    # 而登记会在宿主退出时把 OPENn / Add-in Manager 写脏（WORKLOG #30）。
+    # 因此本函数不触碰 AddIns 集合，只做强制装载：xlam 为 IsAddin 工作簿，
+    # Workbooks.Open 无可见窗口、不切换用户活动窗口；已装载时 Open 返回现有工作簿，无副作用。
     #
-    # 返回 $true = 已得出确定结论，结论见 $script:provState；$false = 登记或打开过程出错（已记日志）。
+    # 返回 $true = 已得出确定结论，结论见 $script:provState；$false = 打开过程出错（已记日志）。
     #   trusted  = 宿主里在位的那份就是 $XlamPath（本周期由看门狗打开并复核，或此前已装载）——只有这个状态允许执行初始化宏
     #   foreign  = 宿主里在位的是一份【异路径】的同名副本 → 不打开第二份（两份同名副本相撞会让宿主退不干净），
     #              也绝不执行它的宏：那份可能来自非受信任位置或是旧版本，而看门狗服务的是管理员权限的 Excel
@@ -341,8 +388,8 @@ function Provision-App($app) {
     #   mismatch = 看门狗执行了 Open，但打开后读到的在位副本路径与 $XlamPath 不符（期间宿主装入了同名副本 /
     #              Open 返回了别的工作簿）→ 不执行宏
     #   unknown  = 无法确认在位情况（查询出错或路径读不到）→ 不打开、不执行宏；调用方不标记 seen，下个周期重试
-    #   failed   = 登记或打开时出错
-    $addins = $null; $entry = $null; $added = $null; $wbs = $null; $wb = $null
+    #   failed   = 打开时出错
+    $wbs = $null; $wb = $null; $uiState = $null
     $script:provState = 'failed'; $script:foreignPath = ''
     $done = $false
     try {
@@ -351,28 +398,12 @@ function Provision-App($app) {
         if ($script:lookupState -eq 'error') {
             $script:provState = 'unknown'
         } elseif ($script:lookupState -eq 'found') {
-            # 已有同名加载项在位：不登记、不打开第二份，只判定它是不是 $XlamPath 本身
+            # 已有同名加载项在位：不打开第二份，只判定它是不是 $XlamPath 本身
             if (Test-SamePath $loaded $XlamPath) { $script:provState = 'trusted' }
             else { $script:provState = 'foreign'; $script:foreignPath = $loaded }
         } else {
-            # 明确不在位：登记，并从 $XlamPath 打开
-            $addins = $app.AddIns
-            $idx = Find-AddInIndex $addins
-            if ($idx -gt 0) { $entry = $addins.Item($idx) }
-            if ($null -eq $entry) {
-                $added = $addins.Add($XlamPath, $false)
-                $idx = Find-AddInIndex $addins
-                if ($idx -gt 0) { $entry = $addins.Item($idx) } else { $entry = $added; $added = $null }
-            }
-            # 只对「登记的就是 $XlamPath 本身」的条目置 Installed=True：按名字找到的条目可能登记在别的路径，
-            # 置位会让 Excel 从那个路径装载一份未经核验的副本。读不到登记路径时同样不置位。
-            if ($null -ne $entry) {
-                $entryPath = ''
-                try { $entryPath = [string]$entry.FullName } catch { $entryPath = '' }
-                $entryInstalled = $true
-                try { $entryInstalled = [bool]$entry.Installed } catch { $entryInstalled = $true }
-                if ((Test-SamePath $entryPath $XlamPath) -and (-not $entryInstalled)) { $entry.Installed = $true }
-            }
+            # 明确不在位：从 $XlamPath 打开（只装载、不登记）
+            $uiState = Get-HostUiState $app
             $wb = $wbs.Open($XlamPath)
             # 打开后立即复核：在位的那份必须就是 $XlamPath（检查与打开之间宿主可能已装入同名副本）
             $opened = ''
@@ -382,35 +413,101 @@ function Provision-App($app) {
         }
         $done = $true
     } catch {
-        WdLog ("装载失败（AddIns 登记 / Workbooks.Open）: " + $_.Exception.Message)
+        WdLog ("装载失败（Workbooks.Open）: " + $_.Exception.Message)
     } finally {
-        Release-Com $wb; Release-Com $wbs; Release-Com $added; Release-Com $entry; Release-Com $addins
+        # 宿主显示设置的恢复放在 finally：打开即触发加载项的 Workbook_Open，Excel 在该事件处理结束时已把
+        # DisplayAlerts / ScreenUpdating 复位为 True——复核不符要恢复，Workbooks.Open 中途抛错（事件可能已经
+        # 跑完）同样要恢复；没走到打开这一步（$uiState 为 $null）则不碰。
+        if ($null -ne $uiState) { Restore-HostUiState $app $uiState }
+        Release-Com $wb; Release-Com $wbs
     }
     return $done
 }
 
 function Menu-Exists($app) {
-    # 右键菜单 Tag 是否在位。下标遍历 + 逐个释放（见 Find-AddInIndex 的说明）；任何异常原样抛给主循环。
+    # 右键菜单 Tag 是否在位。下标遍历 + 逐个释放（每个控件查完即在 finally 里释放，属性读取抛异常
+    # ——宿主繁忙 / RPC 拒绝——时同样不漏）；任何异常原样抛给主循环。
     # 注意：这只是「已初始化」的幂等标记，不是加载项健康检查。
+    # 读不到 ≠ 不在位（v1.6.0）：控件数读不到时直接抛异常；控件的 Tag 读不到时先记一笔、继续扫描——找到带标签
+    # 的控件就说明菜单在位（途中别的控件读不到不影响这个结论），没找到且有控件读不到才是「无法确认菜单不在位」，
+    # 抛异常交给主循环走「附着失败（退避重试）」。PS 5.1 下属性读取失败可能不上抛而静默得到空值（名为 Count
+    # 的属性实测如此），真实 Excel 里无标签控件的 Tag 是空串而不是 $null——所以 $null 只可能是读不到。若当成
+    # 「0 个控件 / 无标签」返回 $false，已在运行的会话会被当成未装载再装载、初始化一次；而遇到第一个读不到的
+    # 控件就抛，则第三方加载项插在前面的某个控件若一直读不到，菜单明明在位也会永远装载不上。
     $found = $false
+    $unknown = 0
     $bars = $null; $bar = $null; $ctrls = $null; $ctrl = $null
     try {
         $bars = $app.CommandBars
         $bar = $bars.Item('Cell')
         $ctrls = $bar.Controls
-        $n = [int]$ctrls.Count
+        $nRaw = $ctrls.Count
+        if ($null -eq $nRaw) { throw '命令栏控件数读不到（宿主繁忙）' }
+        $n = [int]$nRaw
         for ($i = 1; $i -le $n; $i++) {
             $ctrl = $null
             try {
                 $ctrl = $ctrls.Item($i)
-                if ($ctrl.Tag -eq 'AttachLinkCtx') { $found = $true }
+                $tag = $ctrl.Tag
+                if ($null -eq $tag) { $unknown++ }
+                elseif ($tag -eq 'AttachLinkCtx') { $found = $true }
             } finally { Release-Com $ctrl }
             if ($found) { break }
         }
+        if ($unknown -gt 0 -and -not $found) { throw ('有 ' + $unknown + ' 个控件的 Tag 读不到（宿主繁忙），且没有找到带标签的菜单项') }
     } finally {
         Release-Com $ctrl; Release-Com $ctrls; Release-Com $bar; Release-Com $bars
     }
     return $found
+}
+
+function Remove-DeadMenuControls($app) {
+    # 死菜单根除（v1.6.0 R2）：从【外部】删除 Cell 命令栏上带 AttachLinkCtx 标签的控件，返回删掉的个数；
+    # -1 = 一个都没删成、且存在读不到 / 删不掉的控件——命令栏整体不可访问，或宿主繁忙导致个别控件读不到 Tag
+    #       （读不到的那个可能就是死菜单，不能谎报「未找到」），调用方按「暂未删除、稍后重试」处理。
+    # 为什么不能只靠装载后的初始化去删（2026-11-26 实测，WORKLOG #34）：非临时的 AttachLinkCtx 控件如果是在
+    # Workbooks.Open 触发的 Workbook_Open 里被加载项的 RegisterMenu 删除，只是当前会话里不见了，实例正常
+    # 退出时仍会被写回 Excel15.xlb——缓存里的死菜单永远清不掉，每个新实例都会再带着它启动。由外部客户端
+    # 删除并正常退出才会真正清缓存。只在 deadmenu 结论下调用（菜单 Tag 在位、加载项工作簿明确 notfound，
+    # 即这些控件点了也只会报宏不可用），删除后照常走装载流程，由初始化重建正式菜单。
+    # COM 纪律同 Menu-Exists：下标遍历（倒序——删除不改变尚未遍历部分的下标）、每个控件用完即在 finally 里
+    # 释放、不留链式访问；单个控件 Tag 读不到 / 删不掉只跳过它，不影响其余控件。
+    $removed = 0; $failed = 0
+    $bars = $null; $bar = $null; $ctrls = $null; $ctrl = $null
+    try {
+        $bars = $app.CommandBars
+        $bar = $bars.Item('Cell')
+        $ctrls = $bar.Controls
+        # 控件数读不到时显式按「不可访问」处理：PS 5.1 对名为 Count 的属性有特殊处理，读取失败不一定上抛、
+        # 可能静默得到空值（实测）——不能把它当成 0 个控件。
+        $nRaw = $ctrls.Count
+        if ($null -eq $nRaw) {
+            $removed = -1
+        } else {
+            $n = [int]$nRaw
+            for ($i = $n; $i -ge 1; $i--) {
+                $ctrl = $null
+                try {
+                    $ctrl = $ctrls.Item($i)
+                    # Tag 读到 $null 按「读不到」计一次失败：真实 Excel 里无标签控件的 Tag 是空串而不是 $null
+                    # （实测 Cell 栏 51 个内置控件全部为 ""），而 PS 5.1 下属性读取失败不一定上抛、可能静默得到
+                    # $null——读不到的那个可能就是死菜单，不能当成「无标签」放过
+                    $tag = $ctrl.Tag
+                    if ($null -eq $tag) { $failed++ }
+                    elseif ($tag -eq 'AttachLinkCtx') { [void]$ctrl.Delete(); $removed++ }
+                } catch {
+                    # 取不到该控件，或读 Tag / 删除时抛异常（宿主繁忙）：跳过它，继续处理其余控件
+                    $failed++
+                } finally { Release-Com $ctrl }
+            }
+        }
+    } catch {
+        $removed = -1
+    } finally {
+        Release-Com $ctrl; Release-Com $ctrls; Release-Com $bar; Release-Com $bars
+    }
+    if ($removed -eq 0 -and $failed -gt 0) { return -1 }
+    return $removed
 }
 
 WdLog ("看门狗启动, pid=" + $PID + ", xlam=" + $XlamPath)      # 带上自身 pid：常驻与被测看门狗可能共用同一份日志，排障时要能区分
@@ -423,6 +520,7 @@ $hiddenSince = @{}            # 隐藏实例的首次见到时刻（pid → 时�
 $hiddenWin = @{}              # 文档窗口在「隐藏判定」上的状态（窗口键 → New-WindowState），逻辑见 Get-HiddenDecision / Test-HiddenReevaluate
 $maxReeval = 3                # 已判定为隐藏的窗口因「Win32 由不可见变为可见」而立即重新评估的次数上限
 $hiddenRecheckSeconds = 30    # Win32 可见却没有新跳变时的低频只读重查间隔（秒）；不设次数上限，避免窗口被永久跳过
+$lastPresenceUnknownLog = $null   # 上次记「菜单在位但无法确认装载状态」日志的时刻（限频 60 秒一行，全局一条）
 
 while ($true) {
     $cycle++
@@ -545,21 +643,74 @@ while ($true) {
                         }
                     }
 
-                    # ---- 已随宿主正常启动装载（右键菜单在位）→ 不做任何装载动作 ----
-                    # v1.4.3 起安装器默认部署看门狗，普通双击打开的 Excel 启动时已由 OPENn 装好加载项：
-                    # 再 Open + Run 一次属多余，还会在用户正在工作的会话里动右键菜单与快捷键。
-                    # 鼎信诺拉起的自动化实例没有菜单，照常走下方装载流程。
-                    # 注意：这里不要再加任何链式 COM 访问（如读取在位副本路径）。看门狗先运行一段时间再附着时，
-                    # 这类调用产生的中间对象一次 GC 回收不掉，会把该 Excel 钉在内存里不退（WORKLOG #27 会诊实测）。
+                    # ---- 在位判定（v1.6.0 加固，R2）：菜单 Tag + Workbooks 三态联合确认 ----
+                    # 菜单在位不可反推装载态：Excel 会把非临时的命令栏控件写入 Excel15.xlb 缓存，
+                    # 残留的 AttachLinkCtx 控件形成「死菜单」（菜单在位、加载项工作簿 notfound，旧版
+                    # 据此漏装载，2026-11-24 受控复现）。因此菜单在位后再用 Workbooks 三态确认加载项
+                    # 工作簿在位情况，由纯函数 Get-PresenceDecision 分流：
+                    #   inplace   = 在位的就是 $XlamPath → 标记完成，不再 Open / Run（普通双击 Excel 的常态）
+                    #   foreign   = 在位的是异路径同名副本 → 维持不动（与 Provision-App 同一纪律）
+                    #   deadmenu  = 加载项工作簿明确 notfound → 按未装载走下方装载流程（装载前先由看门狗从外部
+                    #               删除残留控件——根除缓存，见 Remove-DeadMenuControls）
+                    #   unknown   = 查询出错 / 路径读不到 → 不动作、不标 seen，下周期重试（日志限频 60 秒一行）
+                    # 菜单不在位（notloaded）不做三态查询，直接走装载流程。
+                    # COM 纪律（WORKLOG #27）：取到的 Workbooks 存局部变量、finally Release-Com，
+                    # 不新增链式访问；Get-LoadedAddInPath 内部读完即释放。
+                    $deadMenu = $false
                     if (Menu-Exists $app) {
-                        $seen[$key] = $true
-                        WdLog ("已在位，无需装载: hwnd=" + $h + " pid=" + $winPid)
-                        continue
+                        $wbsL = $null
+                        $lookupState = 'error'; $lookupPath = $null
+                        try {
+                            $wbsL = $app.Workbooks
+                            $lookupPath = Get-LoadedAddInPath $wbsL 'AttachLink.xlam'
+                            $lookupState = $script:lookupState
+                        } catch {
+                            $lookupState = 'error'    # 连 Workbooks 都取不到（宿主正忙）→ 按无法确认处理
+                        } finally {
+                            Release-Com $wbsL
+                        }
+                        $samePath = $false
+                        if ($lookupState -eq 'found') { $samePath = Test-SamePath $lookupPath $XlamPath }
+                        $presence = Get-PresenceDecision $true $lookupState $samePath
+                        if ($presence -eq 'inplace') {
+                            $seen[$key] = $true
+                            WdLog ("已在位，无需装载: hwnd=" + $h + " pid=" + $winPid)
+                            continue
+                        } elseif ($presence -eq 'foreign') {
+                            $seen[$key] = $true
+                            WdLog ("已在位，无需装载: hwnd=" + $h + " pid=" + $winPid + " 在位副本=" + $lookupPath)
+                            continue
+                        } elseif ($presence -eq 'unknown') {
+                            # 宿主繁忙（如用户正在编辑单元格）会每个周期都走到这里：限频 60 秒一行，
+                            # 避免每 2 秒刷一行把事件行淹没。不标 seen，下周期重试。
+                            $nowU = Get-Date
+                            if ($null -eq $script:lastPresenceUnknownLog -or (($nowU - [datetime]$script:lastPresenceUnknownLog).TotalSeconds -ge 60)) {
+                                $script:lastPresenceUnknownLog = $nowU
+                                WdLog ("菜单在位但无法确认加载项装载状态（查询出错或路径不可读），本周期不处理: hwnd=" + $h + " pid=" + $winPid)
+                            }
+                            continue
+                        }
+                        # deadmenu：菜单在位但加载项工作簿明确不在位（命令栏缓存残留），按未装载处理
+                        WdLog ("菜单在位但加载项未装载（命令栏缓存残留），按未装载处理: hwnd=" + $h + " pid=" + $winPid)
+                        $deadMenu = $true
                     }
 
-                    # 写操作（打开加载项 / 执行宏）前复核目标窗口仍在：宿主若已开始退出，文档窗口首当其冲被销毁，
-                    # 此时再 Open / Run 会打断退出流程。窗口已不在就什么都不做（下个周期它也不会再被枚举到）。
+                    # 写操作（删除死菜单控件 / 打开加载项 / 执行宏）前复核目标窗口仍在：宿主若已开始退出，文档窗口首当其冲被销毁，
+                    # 此时再动命令栏或 Open / Run 会打断退出流程。窗口已不在就什么都不做（下个周期它也不会再被枚举到）。
                     if (-not [AttachLinkWatchdog.Native]::IsWindowAlive($h)) { continue }
+
+                    if ($deadMenu) {
+                        # 死菜单根除：装载之前先由看门狗从外部删掉残留控件（为什么必须从外部删见 Remove-DeadMenuControls）。
+                        # 删不掉不影响本周期装载——装载后的初始化仍会在会话内清掉死菜单，缓存留待下个实例再试。
+                        $deadRemoved = Remove-DeadMenuControls $app
+                        if ($deadRemoved -gt 0) {
+                            WdLog ("已删除死菜单控件 " + $deadRemoved + " 个（实例正常退出后不再写入命令栏缓存）: hwnd=" + $h + " pid=" + $winPid)
+                        } elseif ($deadRemoved -eq 0) {
+                            WdLog ("未找到可删除的死菜单控件（期间已被其它方清理），继续装载: hwnd=" + $h + " pid=" + $winPid)
+                        } else {
+                            WdLog ("死菜单控件暂未删除（宿主正忙，命令栏不可访问），本周期仍照常装载，缓存留待下个实例再试: hwnd=" + $h + " pid=" + $winPid)
+                        }
+                    }
 
                     if (Provision-App $app) {
                         if ($script:provState -eq 'trusted' -and -not [AttachLinkWatchdog.Native]::IsWindowAlive($h)) {

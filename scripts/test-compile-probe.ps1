@@ -100,6 +100,9 @@ $entryTable = [ordered]@{
     'AttachLink_RenameDiag'           = @{ mode = 'phase2'; args = @('STR:probe') }
     'AttachLink_GetHashCount'         = @{ mode = 'phase2' }
     'AttachLink_ResetHashCount'       = @{ mode = 'phase2' }
+    'AttachLink_HashEngine'           = @{ mode = 'phase2'; args = @('SRCFILE', 'NUM:0') }   # R4：engine 0=生产分派（对夹具源文件安全）
+    'AttachLink_HashEngineState'      = @{ mode = 'phase2' }   # R4：capi/win64 状态
+    'AttachLink_TestCapiState'        = @{ mode = 'phase2'; args = @('NUM:0') }   # R4：CAPI 状态测试钩子归零（下次使用重新自检）
     'AttachLink_GetProgressCount'     = @{ mode = 'phase2' }
     'AttachLink_ResetProgressCount'   = @{ mode = 'phase2' }
     'AttachLink_NotifyNormalizeFailure' = @{ mode = 'phase2' }   # 无参形态；带 WB 形态见 phase2b
@@ -110,6 +113,9 @@ $entryTable = [ordered]@{
     'AttachLink_TestThrowAtInsert'    = @{ mode = 'phase2'; args = @('NUM:0') }   # V2 包装器兜底注入归零
     'AttachLink_TestGrowAfterCopy'    = @{ mode = 'phase2'; args = @('NUM:0') }   # V11b 复制后源增长注入归零
     'AttachLink_TestWebPathGate'      = @{ mode = 'phase2'; args = @('STR:https://example.test/wb.xlsx') }   # V10 网页闸
+    'AttachLink_FolderNoticeNeeded'   = @{ mode = 'phase2'; args = @('STR:C:\no-such-attach-dir', 'STR:insert') }   # R5：附件夹提示去重判定（无对话框）
+    'AttachLink_FolderNoticeMark'     = @{ mode = 'phase2'; args = @('STR:C:\no-such-attach-dir', 'STR:insert') }   # R5：登记某入口对某附件夹已提示
+    'AttachLink_FolderNoticeReset'    = @{ mode = 'phase2' }   # R5：清空提示记录
     'AttachLink_UpdateVersionCore'    = @{ mode = 'phase2'; args = @('ATTFILE', 'SRCFILE') }   # N-07：未登记基线 → 安全早退
     'Auto_Close'                      = @{ mode = 'phase2' }   # 最后：注销菜单与快捷键
 }
