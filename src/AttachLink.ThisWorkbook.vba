@@ -1,29 +1,28 @@
 ' 由构建脚本写入加载项的 ThisWorkbook 模块（请勿放入标准模块）
+' v1.6.4：本模块不再有 Workbook_Open，也不再处理「打开工作簿」事件。
+'   - 外部装载（看门狗经 Workbooks.Open 打开本加载项）：完全靠看门狗显式调用 AttachLink_Initialize
+'   - 交互式启动（双击打开 Excel、在加载项列表里勾选）：靠标准模块的 Auto_Open
+'   两条路都经 AttachLink_BindEvents 挂上这里的应用事件（右键自愈、保存前归一化）。
+'   为什么要去掉「打开」相关的两个入口：它们的处理一执行，Excel 就会把宿主的 DisplayAlerts /
+'   ScreenUpdating 复位为 True（2026-11-26 / 27 实测，与加载项代码无关）——别的程序拉起的 Excel 里，
+'   对方关掉的提示会被重新打开，隐藏的自动化实例会卡在提示框上。
 Option Explicit
 
 Private WithEvents app As Application
 
-Private Sub Workbook_Open()
+' 挂应用事件：由 AttachLink_Initialize 调用，幂等。事件对象声明在本文档模块，绑定只能在这里做。
+' 这里不吞错误：绑定失败要让初始化宏报错，看门狗的「三项齐备」判定才会发现
+Public Sub AttachLink_BindEvents()
     Set app = Application
-    ' 无论 Excel 以何种方式启动（交互式 / 鼎信诺通过 COM 自动化拉起），
-    ' 加载项装载时都会触发本事件；Auto_Open 在自动化启动下会被跳过，
-    ' 因此初始化统一在这里兜底执行
-    On Error Resume Next
-    AttachLink_Initialize
-End Sub
-
-Private Sub app_WorkbookOpen(ByVal Wb As Workbook)
-    ' 打开任何工作簿时确认菜单在位（兜底自愈）
-    On Error Resume Next
-    AttachLink_EnsureMenu
-    ' T8：该工作簿上次保存若有归一化失败，打开时状态栏提醒（不弹模态框）
-    AttachLink_NotifyNormalizeFailure Wb
 End Sub
 
 Private Sub app_SheetBeforeRightClick(ByVal Sh As Object, ByVal Target As Range, Cancel As Boolean)
     ' 右键瞬间自愈：右键菜单被其他加载项清除/重置时，当场补回
     On Error Resume Next
     AttachLink_EnsureMenu
+    ' T8：该工作簿上次保存若有归一化失败，在这里提醒。v1.6.4 起不再处理「打开工作簿」事件，
+    ' 原先「打开时再提醒」改在用户于该工作簿里右键时出现（保存后的那次状态栏提醒不变）
+    AttachLink_NotifyNormalizeFailure Sh.Parent
 End Sub
 
 Private Sub app_WorkbookBeforeSave(ByVal Wb As Workbook, ByVal SaveAsUI As Boolean, Cancel As Boolean)

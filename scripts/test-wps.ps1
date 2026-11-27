@@ -26,10 +26,14 @@ $xlamPath = Join-Path $PSScriptRoot '..\dist\AttachLink.xlam'
 '--- 1) 打开 xlam + SelfTest ---'
 try {
     $null = $wps.Workbooks.Open($xlamPath)
+    # v1.6.4：加载项不再带 Workbook_Open，打开不隐式初始化；菜单、快捷键、应用事件都由显式的 AttachLink_Initialize 建立
+    $menuOnOpen = @(@($wps.CommandBars.Item('Cell').Controls) | Where-Object { [string]$_.Caption -eq '插入附件链接（可多选）' }).Count
+    Check ($menuOnOpen -eq 0) "打开 xlam 不隐式初始化（Cell 菜单上 AttachLink 控件数 $menuOnOpen）"
+    $null = $wps.Run('AttachLink_Initialize')
     $r = $wps.Run('AttachLink_SelfTest')
     Check ($r -eq $true) 'SelfTest（晚绑定改造后可编译）'
     $v = $wps.Run('AttachLink_GetVersion')
-    Check ("$v" -eq '1.6.3') "GetVersion=1.6.3（实际 $v）"
+    Check ("$v" -eq '1.6.4') "GetVersion=1.6.4（实际 $v）"
 } catch { Check $false "打开/SelfTest 失败: $($_.Exception.Message.Split("`n")[0])" }
 
 '--- 2) 清单/体检（含标记回退） ---'

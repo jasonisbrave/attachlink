@@ -185,6 +185,7 @@ try {
     # 工作簿窗口【之前】设——零工作簿实例没有 EXCEL7 窗口，看门狗此时不可能附着；这样看门狗之后的任何快照都晚于
     # 这里的设置，从构造上排除「带着设置之前的快照装载、再把旧值恢复回去」的竞态（2026-11-26 实测遇到过一次）。
     # Excel 在加载项的 Workbook_Open 事件处理结束时会把这两项一律复位为 True，看门狗装载后必须恢复成这里的原值（[4] 断言）。
+    # v1.6.4 起加载项没有 Workbook_Open，装载那一刻不再复位；看门狗的写回保留作兜底，[4] 照常断言。
     $xl.DisplayAlerts = $false
     $xl.ScreenUpdating = $false
     $xl.Visible = $true
@@ -289,6 +290,26 @@ try {
                 $hostUiUntouched = $false
                 "    FAIL: 看门狗装载后宿主设置被改动（DisplayAlerts=$hostAlerts ScreenUpdating=$hostScreen，装载前均为 False）"
             }
+        }
+    }
+
+    # v1.6.4：加载项不再处理「打开工作簿」事件。装载完成之后再打开一本工作簿，宿主的两项设置不得被改回 True——
+    # v1.6.3 及之前会：加载项的「打开工作簿」处理一执行就复位，而看门狗只在装载那一刻写回一次（第二轮预研 4.3 节）
+    if ($deployedDiffers) {
+        '    SKIP 打开工作簿后的宿主设置检查：机器级常驻看门狗与被测脚本版本不一致'
+    } elseif ($null -eq $uiAfter) {
+        '    SKIP 打开工作簿后的宿主设置检查：装载后的宿主设置没有读到，本断言没有判别力'
+    } else {
+        $wbExtra = $null
+        try { $wbExtra = $wbs.Add(); $wbExtra.Saved = $true } catch {} finally { Release-Com $wbExtra }
+        $uiOpened = Read-HostUiState $xl
+        if ($null -eq $uiOpened) {
+            '    SKIP 打开工作簿后的宿主设置检查：打开工作簿后读不到宿主设置'
+        } elseif ((-not $uiOpened.alerts) -and (-not $uiOpened.screen)) {
+            '    pass: 装载完成后再打开一本工作簿，宿主的 DisplayAlerts / ScreenUpdating 仍为 False（加载项不再处理「打开工作簿」事件）'
+        } else {
+            $hostUiUntouched = $false
+            "    FAIL: 装载完成后再打开一本工作簿，宿主设置被改回 True（DisplayAlerts=$($uiOpened.alerts) ScreenUpdating=$($uiOpened.screen)）"
         }
     }
 

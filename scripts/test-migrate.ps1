@@ -46,6 +46,8 @@ foreach ($pair in @(@('WP-A.xlsx', @("$srcA\a.pdf","$srcA\b.pdf")), @('WP-B.xlsx
 
 # ---- 以归档目录中的 WP-A 为宿主运行迁移核心 ----
 $null = $xl.Workbooks.Open($xlam)
+# v1.6.4：加载项不再带 Workbook_Open，打开不隐式初始化——菜单、快捷键、应用事件都由显式初始化建立
+$null = $xl.Run('AttachLink_Initialize')
 $null = $xl.Workbooks.Open("$arch\WP-A.xlsx")
 "--- 迁移汇总 ---"
 $xl.Run('AttachLink_ArchiveMigrateCore', $srcA)

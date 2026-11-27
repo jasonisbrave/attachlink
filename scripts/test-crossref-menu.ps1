@@ -61,7 +61,9 @@ $procId = 0
 [void][WM.U32]::GetWindowThreadProcessId([IntPtr]$xl.Hwnd, [ref]$procId)
 "Excel PID: $procId"
 $null = $xl.Workbooks.Open($xlam)     # 第一时间装载 dist 副本（防常驻看门狗抢装）
-$xl.DisplayAlerts = $false             # 打开加载项会触发 Workbook_Open，Excel 在其结束时把 DisplayAlerts 复位为 True——按红线设在打开之后（开发交接 3.5）
+# v1.6.4：加载项不再带 Workbook_Open，打开不隐式初始化——菜单、快捷键、应用事件都由显式初始化建立
+$null = $xl.Run('AttachLink_Initialize')
+$xl.DisplayAlerts = $false             # 打开加载项会触发 Workbook_Open，Excel 在其结束时把 DisplayAlerts 复位为 True——按红线设在打开之后（开发交接 3.5）；v1.6.4 起加载项自身不再复位；保留此写法对别的加载项仍稳妥
 
 # 超时兜底：10 分钟后脚本仍未结束（COM 卡死）→ 按 PID 结束本实例
 $sentinel = "$base\done.flag"

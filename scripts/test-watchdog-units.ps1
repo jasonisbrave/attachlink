@@ -261,6 +261,8 @@ Check ($r.state -eq 'trusted' -and $r.opened.Count -eq 1 -and $null -eq $ainsNon
 # 装载不留副作用（v1.6.0）：Excel 在 Workbook_Open 事件处理结束时会把宿主的 DisplayAlerts / ScreenUpdating 复位为 True
 # （2026-11-26 实测，任何带 Workbook_Open 的加载项都会触发；假对象的 Open 照此模拟）。看门狗装载后须恢复装载前的值——
 # 否则别的程序拉起的 Excel 里，被关掉的警告会重新打开，一个「是否替换」提示框就能把隐藏的自动化实例卡死（实测卡了 22 分钟）
+# v1.6.4 起 AttachLink 自己不再带 Workbook_Open，真实装载不再复位；这一段断言的是看门狗的兜底写回本身（假对象的 Open 仍照
+# Excel 的真实行为模拟复位），加载项侧的契约由 scripts\test-init-contract.ps1 负责
 $st = Get-HostUiState ([pscustomobject]@{ DisplayAlerts = $false; ScreenUpdating = $false })
 Check ($st.alerts -eq $false -and $st.screen -eq $false) 'Get-HostUiState：读到宿主两项设置的原值'
 $uo = [pscustomobject]@{ DisplayAlerts = $true; ScreenUpdating = $true }

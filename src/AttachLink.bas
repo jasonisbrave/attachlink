@@ -59,6 +59,10 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.6.4：预研基础第 4 步（不发版）——改加载项的初始化方式：去掉 Workbook_Open（应用事件的绑定挪进
+'       AttachLink_Initialize），去掉「打开工作簿」的事件处理；外部装载完全靠看门狗显式初始化，交互式
+'       启动靠 Auto_Open。归一化失败的「打开时再提醒」改为在该工作簿里右键时提醒。
+'       本版其余 VBA 功能无变化
 ' 1.6.3：预研基础第 3 步（不发版）——换掉 VBS 启动器：计划任务直接以无窗口启动器 AttachLink.WatchdogLauncher.exe
 '       为动作（看门狗异常退出后由启动器拉起，连续 3 次没能稳定运行才放弃；任务跟踪启动器，状态 Running）。
 '       本版 VBA 功能无变化，仅版本号
@@ -101,7 +105,7 @@ Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ■ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.6.3"
+Public Const ATTACHLINK_VERSION As String = "1.6.4"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"
@@ -236,13 +240,19 @@ End Function
 
 '============================ 注册与注销 ==============================
 Public Sub Auto_Open()
-    ' 注意：仅交互式启动 Excel 时才会执行；鼎信诺等软件通过 COM 自动化拉起 Excel
-    ' 时会跳过 Auto_Open，初始化由 ThisWorkbook.Workbook_Open 兜底执行
+    ' 交互式启动的初始化入口：用户双击打开 Excel、或在加载项列表里勾选本加载项时执行。
+    ' 外部装载（看门狗经 Workbooks.Open 打开本加载项）不会运行本过程——用代码打开工作簿不触发
+    ' Auto_Open；v1.6.4 起 ThisWorkbook 也不再带 Workbook_Open 兜底，那种装载完全靠看门狗显式
+    ' 调用 AttachLink_Initialize
     AttachLink_Initialize
 End Sub
 
-' 初始化入口：注册右键菜单与快捷键（幂等，可重复调用）
+' 初始化入口（幂等，可重复调用）：挂应用事件、注册右键菜单与快捷键。
+' v1.6.4：挂应用事件（ThisWorkbook.AttachLink_BindEvents）挪到这里——原先在 Workbook_Open 里，
+' 该入口已去掉（见 ThisWorkbook 模块头注释）
 Public Sub AttachLink_Initialize()
+    ' 事件对象声明在 ThisWorkbook 模块里；标准模块调用文档模块里的过程必须带对象名（不带会报「子过程或函数未定义」）
+    ThisWorkbook.AttachLink_BindEvents
     RegisterMenu True
     If Len(HOTKEY_INSERT) > 0 Then Application.OnKey HOTKEY_INSERT, "AttachLink_Insert"
     If Len(HOTKEY_INDEX) > 0 Then Application.OnKey HOTKEY_INDEX, "AttachLink_BuildIndex"
@@ -1669,7 +1679,7 @@ Public Function NormalizeAttachmentLinks(ByVal wb As Object) As Long
             End If
         Next hl
     Next ws
-    ' 记录 / 清除该工作簿的失败明细（供状态栏提醒与下次打开时提醒）
+    ' 记录 / 清除该工作簿的失败明细（供状态栏提醒，以及之后在该工作簿里右键时的提醒）
     If normFail Is Nothing Then Set normFail = CreateObject("Scripting.Dictionary")
     Dim wbKey As String
     wbKey = NormWbKey(wb)
@@ -1701,7 +1711,8 @@ End Sub
 
 ' T8：归一化失败的状态栏提醒（全程不弹模态框）。
 ' 保存完成后由 ThisWorkbook 经 Application.OnTime 调用（无参=汇总全部记录）；
-' 打开工作簿时带 wb 调用（只提醒该工作簿）。WPS 不支持状态栏时静默跳过。
+' 用户在该工作簿里右键时带 wb 调用（只提醒该工作簿；v1.6.4 起不再处理「打开工作簿」事件，
+' 原先的「打开时再提醒」改到这里）。WPS 不支持状态栏时静默跳过。
 Public Sub AttachLink_NotifyNormalizeFailure(Optional ByVal wb As Object)
     On Error Resume Next
     If normFail Is Nothing Then Exit Sub

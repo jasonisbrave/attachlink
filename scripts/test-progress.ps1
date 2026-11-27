@@ -54,6 +54,8 @@ $procId = 0
 [void][WG.U32]::GetWindowThreadProcessId([IntPtr]$xl.Hwnd, [ref]$procId)
 "Excel PID: $procId"
 $null = $xl.Workbooks.Open($xlam)     # 第一时间装载 dist 副本（防常驻看门狗抢装）
+# v1.6.4：加载项不再带 Workbook_Open，打开不隐式初始化——菜单、快捷键、应用事件都由显式初始化建立
+$null = $xl.Run('AttachLink_Initialize')
 
 # 超时兜底：15 分钟后脚本仍未结束（COM 卡死/意外模态）→ 按 PID 结束本实例
 $sentinel = "$base\done.flag"

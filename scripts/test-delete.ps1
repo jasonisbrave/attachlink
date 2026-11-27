@@ -32,6 +32,8 @@ function Check($cond, $label) { if (-not $cond) { $script:ok = $false; "FAIL: $l
 
 try {
     $null = $xl.Workbooks.Open($xlam)
+    # v1.6.4：加载项不再带 Workbook_Open，打开不隐式初始化——菜单、快捷键、应用事件都由显式初始化建立
+    $null = $xl.Run('AttachLink_Initialize')
     $wb = $xl.Workbooks.Add()
     $ws = $wb.Worksheets.Item(1)
     $ws.Name = 'Sheet1'

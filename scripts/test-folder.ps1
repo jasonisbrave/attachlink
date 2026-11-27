@@ -22,6 +22,8 @@ $xl = New-Object -ComObject Excel.Application
 $xl.Visible = $false
 $xl.DisplayAlerts = $false
 $null = $xl.Workbooks.Open($xlam)
+# v1.6.4：加载项不再带 Workbook_Open，打开不隐式初始化——菜单、快捷键、应用事件都由显式初始化建立
+$null = $xl.Run('AttachLink_Initialize')
 $wb = $xl.Workbooks.Add()
 $wb.SaveAs("$wbDir\main.xlsx", 51)
 

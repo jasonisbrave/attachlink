@@ -18,9 +18,11 @@
 # （WORKLOG #30），是纯粹的状态污染。切换后会话内装载功能不变、加载项列表零差异
 # （技术预研 docs\AttachLink技术预研-看门狗只装载不登记可行性.md）。用户级安装
 # （install.ps1）的 OPENn 登记是交互式 Excel 启动装载的设计通道，不在此列、不受影响。
-# 装载不留副作用（v1.6.0）：打开加载项会触发它的 Workbook_Open，Excel 在该事件处理结束时会把宿主的
+# 装载不留副作用（v1.6.0）：打开带 Workbook_Open 的加载项，Excel 在该事件处理结束时会把宿主的
 # DisplayAlerts / ScreenUpdating 复位为 True；看门狗装载前记下原值、装载后恢复（Get-HostUiState /
-# Restore-HostUiState），不把宿主（别的程序）关掉的警告重新打开。
+# Restore-HostUiState），不把宿主（别的程序）关掉的警告重新打开。v1.6.4 起 AttachLink 自己不再带
+# Workbook_Open、也不再处理「打开工作簿」事件，这两处复位不再发生；写回保留作兜底（宿主里若有别的带
+# Workbook_Open 的加载项，或被装载的是旧版加载项）。
 #
 # 时序说明：零工作簿实例没有 EXCEL7 窗口，自然不会附着；鼎信诺打开底稿
 # （出现工作簿窗口）后下个周期自动完成装载——时机恰好。
@@ -457,9 +459,10 @@ function Provision-App($app) {
     } catch {
         WdLog ("装载失败（Workbooks.Open）: " + $_.Exception.Message)
     } finally {
-        # 宿主显示设置的恢复放在 finally：打开即触发加载项的 Workbook_Open，Excel 在该事件处理结束时已把
-        # DisplayAlerts / ScreenUpdating 复位为 True——复核不符要恢复，Workbooks.Open 中途抛错（事件可能已经
-        # 跑完）同样要恢复；没走到打开这一步（$uiState 为 $null）则不碰。
+        # 宿主显示设置的恢复放在 finally：打开带 Workbook_Open 的加载项时，Excel 在该事件处理结束时已把
+        # DisplayAlerts / ScreenUpdating 复位为 True（v1.6.4 起 AttachLink 自身不再触发，写回留作兜底）——
+        # 复核不符要恢复，Workbooks.Open 中途抛错（事件可能已经跑完）同样要恢复；没走到打开这一步
+        # （$uiState 为 $null）则不碰。
         if ($null -ne $uiState) { Restore-HostUiState $app $uiState }
         Release-Com $wb; Release-Com $wbs
     }
@@ -775,8 +778,9 @@ while ($true) {
                             WdLog ("装载后目标窗口已消失（宿主正在退出），不执行初始化: hwnd=" + $h + " pid=" + $winPid)
                         } elseif ($script:provState -eq 'trusted') {
                             # 只有确认在位的那份就是 $XlamPath 本身，才执行初始化（显式正向判断，不靠排除法）。
-                            # 显式补一次初始化（幂等）：不能依赖加载项的 Workbook_Open 一定执行过——事件关闭时它不执行，
-                            # 已装载时 Workbooks.Open 返回现有工作簿、也不再触发。
+                            # 显式初始化（幂等）：v1.6.4 起加载项没有 Workbook_Open，这是外部装载唯一的初始化入口
+                            # （菜单、快捷键、应用事件都由它建立）；对旧版加载项则不能依赖其 Workbook_Open 一定执行过
+                            # （事件关闭时它不执行，已装载时 Workbooks.Open 返回现有工作簿、也不再触发）。
                             # 成功判定从严（v1.6.1）：初始化宏执行成功、菜单 Tag 在位、版本宏返回非空，三者齐备才标 seen。
                             $initOk = $false
                             try { $null = $app.Run($initMacro); $initOk = $true }
