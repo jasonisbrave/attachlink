@@ -236,7 +236,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall  # 一键�
 | `README.md` | 用法说明 |
 | `dist\AttachLink.xlam` | 预构建安装包 |
 | `scripts\setup.ps1` | 安装编排 |
-| `scripts\watchdog.ps1`、`scripts\watchdog_launcher.vbs` | 看门狗（方式五部署时由 install-elevated 复制） |
+| `scripts\watchdog.ps1`、`dist\AttachLink.WatchdogLauncher.exe`（由 `src\WatchdogLauncher.cs` 构建） | 看门狗与无窗口启动器（方式五部署时由 install-elevated 复制） |
 | `build\install.ps1`、`build\install-elevated.ps1` | 安装核心 / 机器级部署 |
 
 - 如需保留「缺产物时现场构建」（B 回退），再附 `build\build.ps1` + `src\AttachLink.bas` + `src\AttachLink.ThisWorkbook.vba`；纯接收版可不带源码（缺 dist 会直接提示包不完整）
@@ -269,9 +269,10 @@ powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1 -Uninstall
 
 部署内容：
 
-- xlam + 看门狗复制到 `C:\Program Files\AttachLink\`
+- xlam + 看门狗 + 无窗口启动器（`AttachLink.WatchdogLauncher.exe`）复制到 `C:\Program Files\AttachLink\`（部署时顺带清掉旧版留下的 `watchdog_launcher.vbs`）
 - HKLM 受信任位置指向该目录
-- 注册登录计划任务（最高权限常驻，隐藏窗口）
+- 注册计划任务（最高权限，动作直接是无窗口启动器——没有控制台窗口）。任务带两个触发器：登录即启动；另有一个时间触发器每 5 分钟重复，作为兜底——任务不在运行时（启动器被结束，或它放弃之后），下一次重复会重新启动
+- 看门狗异常退出（非 0）后由启动器 10 秒后拉起；连续 3 次没能稳定运行（每次不足 60 秒）才放弃——启动器以看门狗的退出码结束，该值成为计划任务的上次运行结果，其动作写进看门狗日志（「启动器:」开头的行）
 
 之后鼎信诺打开底稿约 2~4 秒内右键菜单自动出现。看门狗日志：`%TEMP%\AttachLinkWatchdog.log`（装载成功行带 xlam 版本号，便于核对两级同版；周期行只在 EXCEL7 窗口数变化或每 30 秒心跳时记录）。
 
@@ -355,9 +356,10 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall
 
 判读时注意：
 
-- **计划任务状态**：显示 Ready 是正常的（启动器不等待看门狗进程），存活只看「看门狗心跳」一项。
+- **计划任务状态**：计划任务直接运行无窗口启动器（`AttachLink.WatchdogLauncher.exe`），看门狗运行期间显示 Running 是正常的；显示 Ready 表示任务当前没有在运行（看门狗不在运行），若刚在任务计划程序里结束过任务，最多 5 分钟后重复触发会重新启动。在任务计划程序里只点「结束」，任务最多 5 分钟后会自己回来；要真正停下请禁用任务（卸载脚本会直接注销任务）。日志里「启动器:」开头的行是启动器写的（看门狗自身写其余行）。
 - **附着失败重试**：日志里的「附着失败（退避重试）」等自愈类重试，少量出现属正常瞬态（显示【信息】）；v1.6.1 起同一个窗口按退避重试（2、4、8、16 秒，封顶 30 秒），这类行会明显减少——若最近 200 行内这类重试达到 20 条以上、或 10 条以上且最早与最晚一条跨越超过 10 分钟，健康检查会给出【留意】「看门狗持续附着失败」，提示目标 Excel 实例可能长期无响应、或看门狗反复被打断，请按处置提示排查，无法定位时把看门狗日志发给维护者。
 - **登录触发器**：被禁用（Enabled=False）时任务虽存在但永远不会随登录触发（【留意】，任务配置不正常）。
+- **重复兜底**：任务须另有一个带重复的时间触发器（每 5 分钟）。没有这个触发器，或重复只挂在登录触发器上（那样要到下次登录才生效，本次登录里没有兜底），健康检查给出【留意】并提示重新「一键安装」。
 - **计划任务账户**：登记的账户不是当前登录用户时给出【留意】（任务只在该账户登录时启动）。
 - **查询失败**：计划任务查询失败（权限不足、服务不可用等）时机器级部署与任务两项显示「无法确认」（【留意】）而非误判「未部署」，其余依赖项跳过并注明「无法确认」。
 
@@ -477,7 +479,7 @@ v1.6.2 起，看门狗**只附着用户看得见的会话**：Excel 整体不可
 | `HOTKEY_INSERT` | `"^+a"` | 插入附件链接快捷键（`""` = 禁用） |
 | `HOTKEY_INDEX` | `"^+k"` | 附件清单快捷键 |
 | `INDEX_SHEET_NAME` | `"附件清单"` | 清单工作表名 |
-| `ATTACHLINK_VERSION` | `"1.6.2"` | 版本号（单一事实源：安装器标题/自检、两级部署哈希核对均引用） |
+| `ATTACHLINK_VERSION` | `"1.6.3"` | 版本号（单一事实源：安装器标题/自检、两级部署哈希核对均引用） |
 
 ## 常见问题
 
@@ -511,6 +513,7 @@ excel-attach-addin/
 ├── src/
 │   ├── AttachLink.bas               # 主模块源码（全部功能 + 顶部配置区）
 │   ├── AttachLink.ThisWorkbook.vba  # ThisWorkbook 事件代码（保存时链接归一化）
+│   ├── WatchdogLauncher.cs           # 无窗口启动器源码（构建为 dist\AttachLink.WatchdogLauncher.exe，计划任务的直接动作）
 │   └── AttachLinkShim.cs            # 📦 归档：已废弃的 COM 引导器路线，不再编译
 ├── build/
 │   ├── build.ps1                    # 构建 → dist/AttachLink.xlam
@@ -546,8 +549,7 @@ excel-attach-addin/
 │   ├── test-identity.ps1            # 附件身份与可信重连回归（95 断言，期望 RESULT: PASS）
 │   ├── test-progress.ps1            # 体检去重 / 进度 / 取消 / 归一化失败可见回归（93 断言，期望 RESULT: PASS）
 │   ├── test-healthcheck.ps1         # 健康检查纯函数与协议回归（156 断言；临时注册表键，不碰真实登记）
-│   ├── healthcheck.ps1              # 健康检查脚本（纯只读：两级部署 / 启用登记 / 受信任位置 / 看门狗心跳；安装器「健康检查」与 /healthcheck 调用）
-│   └── watchdog_launcher.vbs        # 计划任务隐藏启动器（纯 ASCII，部署到 Program Files）
+│   └── healthcheck.ps1              # 健康检查脚本（纯只读：两级部署 / 启用登记 / 受信任位置 / 看门狗心跳；安装器「健康检查」与 /healthcheck 调用）
 ├── dist/                            # 构建产物（分发给同事时必须包含 AttachLink.xlam）
 ├── README.md                        # 使用说明（历史复核记录已移入 WORKLOG）
 ├── WORKLOG.md                       # 交接日志（根因实证、修复批次与验证记录）

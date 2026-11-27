@@ -9,7 +9,8 @@
 # AccessibleObjectFromWindow 取得 Application，强制装载 AttachLink.xlam。
 #
 # 本脚本做四件事：
-#   1. 部署文件到 C:\Program Files\AttachLink\（xlam + 看门狗 + 隐藏启动器）
+#   1. 部署文件到 C:\Program Files\AttachLink\（xlam + 看门狗脚本 + 无窗口启动器 AttachLink.WatchdogLauncher.exe；
+#      v1.6.3 起不再部署 VBS 启动器，旧版留下的 watchdog_launcher.vbs 顺手删除）
 #   2. HKLM 受信任位置指向该目录（管理员控制目录，规避提权宏劫持面；
 #      高完整性 Excel 不受 HKCU per-user 信任位置保障，必须走 HKLM）
 #   3. 注册登录计划任务（当前用户，RunLevel=Highest）：看门狗以最高权限
@@ -48,8 +49,9 @@ $user       = "$env:USERDOMAIN\$env:USERNAME"
 $officeVersions = @('16.0', '15.0', '14.0')
 
 function Get-WatchdogProcessObjects {
-    # 按命令行精确匹配看门狗进程（避免误伤其他 powershell/wscript）
-    return @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='wscript.exe'" -ErrorAction SilentlyContinue |
+    # 按命令行精确匹配看门狗进程（避免误伤其他 powershell/wscript）：看门狗的 PowerShell、启动器 exe、
+    # 以及旧版部署可能留下的 wscript 启动器
+    return @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='wscript.exe' OR Name='AttachLink.WatchdogLauncher.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -like '*AttachLink*watchdog*' })
 }
 
@@ -57,6 +59,13 @@ function Stop-WatchdogProcesses {
     Get-WatchdogProcessObjects | ForEach-Object {
         try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {}
     }
+}
+
+function Get-Sha256([string]$Path) {
+    # .NET 直调哈希（安装器子进程可能加载不了 Utility 模块，Get-FileHash 不可用）
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $fs = [System.IO.File]::OpenRead($Path)
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($fs)) -replace '-', '') } finally { $fs.Close(); $sha.Dispose() }
 }
 
 function Remove-LegacyShim {
@@ -161,19 +170,24 @@ if ($MyInvocation.InvocationName -ne '.') {
         $root     = Split-Path -Parent $PSScriptRoot
         $distXlam = Join-Path $root 'dist\AttachLink.xlam'
         $srcWd    = Join-Path $root 'scripts\watchdog.ps1'
-        $srcVbs   = Join-Path $root 'scripts\watchdog_launcher.vbs'
-        foreach ($f in @($distXlam, $srcWd, $srcVbs)) {
+        $srcLauncher = Join-Path $root 'dist\AttachLink.WatchdogLauncher.exe'
+        foreach ($f in @($distXlam, $srcWd, $srcLauncher)) {
             if (-not (Test-Path $f)) { throw "未找到 $f 。" }
         }
 
         # ---- 1) 停旧看门狗、清理旧 COM 引导器、部署文件 ----
+        # 先禁用旧任务再结束进程：部署的这几秒里不让时间触发器把旧的启动器再拉起来（exe 被占用，复制会失败）。
+        # 重新登记（-Force）得到的是启用的新任务
+        Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
         Stop-WatchdogProcesses
         Remove-LegacyShim
 
         New-Item -ItemType Directory -Force -Path $machineDir | Out-Null
         Copy-Item $distXlam (Join-Path $machineDir 'AttachLink.xlam') -Force
         Copy-Item $srcWd    (Join-Path $machineDir 'watchdog.ps1') -Force
-        Copy-Item $srcVbs   (Join-Path $machineDir 'watchdog_launcher.vbs') -Force
+        Copy-Item $srcLauncher (Join-Path $machineDir 'AttachLink.WatchdogLauncher.exe') -Force
+        # 旧版部署留下的 VBS 启动器：计划任务已不再使用它，删掉（v1.6.3 起）
+        Remove-Item (Join-Path $machineDir 'watchdog_launcher.vbs') -Force -ErrorAction SilentlyContinue
         Get-ChildItem $machineDir -File | ForEach-Object { Unblock-File $_.FullName -ErrorAction SilentlyContinue }
 
         # ---- 1b) 看门狗父进程过滤配置（可选；不写参数时保留既有 watchdog.conf，不清用户的加固配置）----
@@ -193,17 +207,33 @@ if ($MyInvocation.InvocationName -ne '.') {
         Set-ItemProperty -Path $tl -Name 'Date' -Value (Get-Date -Format 'MM/dd/yyyy')
         Set-ItemProperty -Path $tl -Name 'Description' -Value 'AttachLink watchdog deployment (machine)'
 
-        # ---- 3) 登录计划任务：最高权限常驻看门狗（隐藏窗口，经 VBS 启动避免控制台闪现）----
-        $action    = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + (Join-Path $machineDir 'watchdog_launcher.vbs') + '"')
-        $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $user
+        # ---- 3) 计划任务：最高权限常驻看门狗（v1.6.3 起直接以无窗口启动器为动作，不再经过 VBS）----
+        # 计划任务跟踪的是启动器进程：看门狗运行期间任务状态是 Running，停止任务 / 注销时启动器被结束，
+        # 看门狗随启动器的作业对象一起结束。计划任务的「失败后重启」只在动作没能启动时生效（实测进程以非 0
+        # 退出码结束时不会触发），所以「看门狗异常退出后拉起」由启动器自己做。
+        # 两个触发器：① 登录触发——登录即启动；② 时间触发（一次性起点 + 每 5 分钟重复）——外层兜底：任务不在
+        # 运行时（启动器被人结束、或启动器放弃后），下一次重复会重新启动；运行中的新实例被 IgnoreNew 忽略。
+        # 重复必须挂在时间触发器上：挂在登录触发器上时，重复只在那次登录触发之后才开始计时，而安装与升级都发生在
+        # 登录之后——那次登记的登录触发器要到下次登录才触发，在那之前没有任何重复（实测：登记后 NextRunTime 为空）。
+        $action    = New-ScheduledTaskAction -Execute (Join-Path $machineDir 'AttachLink.WatchdogLauncher.exe')
+        $triggerLogon  = New-ScheduledTaskTrigger -AtLogOn -User $user
+        # 重复时长必须是一个任务计划程序接受得了的有限值（[TimeSpan]::MaxValue 会被判为超出范围）；到时不停止任务
+        $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+        $triggerRepeat.Repetition.StopAtDurationEnd = $false
         $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
         # 长驻进程：不限执行时长（PT0S = 禁用时限）；失败自动重启最多 3 次；已运行则忽略新实例
         $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
             -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
             -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($triggerLogon, $triggerRepeat) -Principal $principal -Settings $settings -Force | Out-Null
         # 回读登记账户并明示（提权账户 ≠ 交互用户时的「假部署」要能一眼看穿）
         try { Write-Host ("  任务登记账户 : " + [string](Get-ScheduledTask -TaskName $taskName).Principal.UserId) } catch {}
+        # 重复兜底有没有排上：有时间才是排上了（为空 = 没有任何下一次触发，健康检查的 machine.task 会报）
+        try {
+            $nextRun = [string](Get-ScheduledTaskInfo -TaskName $taskName).NextRunTime
+            if ($nextRun) { Write-Host ("  下次重复触发 : " + $nextRun + "（时间触发器，每 5 分钟）") }
+            else { Write-Host '  下次重复触发 : （空）——重复兜底没有排上，请运行健康检查' }
+        } catch {}
 
         # ---- 4) 立即启动（无需注销重登）----
         Start-ScheduledTask -TaskName $taskName
@@ -218,12 +248,17 @@ if ($MyInvocation.InvocationName -ne '.') {
         $fsB = [IO.File]::OpenRead((Join-Path $machineDir 'AttachLink.xlam'))
         try { $hDest = [BitConverter]::ToString($shaProv.ComputeHash($fsB)) -replace '-', '' } finally { $fsB.Close(); $shaProv.Dispose() }
         $verNote = if ($hDist -eq $hDest) { "与 dist 一致（SHA-256 前16位 $($hDist.Substring(0,16))）" } else { "警告：与 dist 不一致！升级时请务必重跑本脚本同步机器级副本" }
+        $hLDist = Get-Sha256 $srcLauncher
+        $hLDest = Get-Sha256 (Join-Path $machineDir 'AttachLink.WatchdogLauncher.exe')
+        $launcherNote = if ($hLDist -eq $hLDest) { "与 dist 一致（SHA-256 前16位 $($hLDist.Substring(0,16))）" } else { "警告：与 dist 不一致！" }
 
         Write-Host '机器级看门狗部署完成。'
         Write-Host ("  部署目录 : $machineDir")
         Write-Host ("  受信任位置(HKLM) : $tl")
-        Write-Host ("  计划任务 : $taskName（登录自启，最高权限，当前任务状态: $state）")
+        Write-Host ("  计划任务 : $taskName（登录自启 + 每 5 分钟重复兜底，最高权限，当前任务状态: $state）")
+        if ("$state" -eq 'Running') { Write-Host '             看门狗运行期间任务状态应为 Running（启动器是任务的直接动作）' } else { Write-Host '             注意：任务当前不是 Running，看门狗可能没有在运行，请运行健康检查' }
         Write-Host ("  xlam 版本核对 : $verNote")
+        Write-Host ("  启动器核对 : $launcherNote")
         Write-Host '验证：%TEMP%\AttachLinkWatchdog.log 应出现「看门狗启动」且无异常。'
         Write-Host '完全退出并重新打开鼎信诺后生效：打开底稿约 2~4 秒内右键菜单出现。'
     }

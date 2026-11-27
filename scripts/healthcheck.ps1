@@ -9,8 +9,9 @@
 #   diag.*     诊断信息（看门狗日志可读性、近期错误关键字、安装器日志最近结论、OPEN 序列快照）
 # 只读承诺：只读注册表 / 文件 / 计划任务元数据；不创建 COM、不提权、不启停任务、不枚举进程、
 #           不写任何文件——唯一输出是 stdout 的协议行。
-# 活性判定唯一依据 = 看门狗日志心跳（LastWriteTime 距今 ≤ 90 秒）。任务 State=Ready 属正常
-#   （VBS 启动器 sh.Run 不等待看门狗进程）；medium-IL 也枚举不到高完整性的看门狗进程——两者都不作为依据。
+# 活性判定唯一依据 = 看门狗日志心跳（LastWriteTime 距今 ≤ 90 秒）。计划任务直接运行无窗口启动器
+#   （AttachLink.WatchdogLauncher.exe），看门狗运行期间任务 State=Running；medium-IL 也枚举不到高完整性的
+#   看门狗进程——两者都不作为依据。
 # 输出协议（每行一条，制表符分隔；消息内的制表符 / 换行已替换为空格）：
 #   HC<TAB>id<TAB>status<TAB>message      status ∈ ok / warn / fail / skip / info
 #   HCHINT<TAB>id<TAB>hint                可操作的处置建议（可选，跟随对应 HC 行）
@@ -173,8 +174,10 @@ function Get-Hash16([string]$Path) {
 }
 
 function Test-TaskConfig($Task, [string]$ExpectedDir) {
-    # 计划任务配置核对：未被禁用 + 最高权限 + wscript 启动器指向部署目录 + 登录触发。返回 @{ Ok = bool; Detail = string }
-    # State=Ready 属正常（VBS 启动器不等待看门狗进程）；State=Disabled 才是问题（任务不会随登录拉起看门狗）
+    # 计划任务配置核对：未被禁用 + 最高权限 + 无窗口启动器位于部署目录（动作不带参数）+ 登录触发器 + 带重复兜底的时间触发器。
+    # 返回 @{ Ok = bool; Detail = string }
+    # 动作是 AttachLink.WatchdogLauncher.exe（GUI 子系统，无控制台窗口），计划任务跟踪的就是它——
+    # State=Running 属正常（任务在运行 = 启动器与看门狗都在运行）；State=Disabled 才是问题（任务不会随登录拉起看门狗）
     $problems = @()
     try {
         if ("$($Task.State)" -eq 'Disabled') { $problems += '任务已被禁用（State=Disabled）' }
@@ -182,27 +185,55 @@ function Test-TaskConfig($Task, [string]$ExpectedDir) {
     try {
         if ("$($Task.Principal.RunLevel)" -ne 'Highest') { $problems += "RunLevel=$($Task.Principal.RunLevel)（期望 Highest）" }
     } catch { $problems += 'Principal.RunLevel 读不到' }
-    $actOk = $false
+    $exe = ''; $arg = ''
     try {
         $exe = [string]$Task.Actions[0].Execute
-        $arg = [string]$Task.Actions[0].Arguments
-        $actOk = ($exe -match '(?i)wscript\.exe$') -and ($arg -match '(?i)watchdog_launcher\.vbs') -and
-                 ($arg.IndexOf($ExpectedDir, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+        $arg = ([string]$Task.Actions[0].Arguments).Trim()
     } catch {}
-    if (-not $actOk) { $problems += '启动动作不是预期的 wscript + watchdog_launcher.vbs（或部署目录不符）' }
+    $dirN = ''
+    try { $dirN = ([string]$ExpectedDir).Trim().Trim('"').TrimEnd('\') } catch {}
+    $exeOk = $false
+    try {
+        $exeOk = ($exe -match '(?i)AttachLink\.WatchdogLauncher\.exe$') -and
+                 ($exe.Length -gt $dirN.Length + 1) -and
+                 ($exe.Substring(0, $dirN.Length) -ieq $dirN) -and
+                 ($exe[$dirN.Length] -eq '\')
+    } catch {}
+    if (-not $exeOk) { $problems += '启动动作不是预期的 AttachLink.WatchdogLauncher.exe（或部署目录不符）' }
+    if ($arg) { $problems += '启动动作带了参数，与预期不符' }
     $logon = $false
     $logonDisabled = $false
+    $logonRepeatOnly = $false
+    $timeRepeat = $false
     try {
         foreach ($tr in @($Task.Triggers)) {
-            if (($tr.PSObject.TypeNames -join ' ') -match 'LogonTrigger') {
+            $isLogon = (($tr.PSObject.TypeNames -join ' ') -match 'LogonTrigger')
+            $trEnabled = $true
+            try { if ($tr.Enabled -eq $false) { $trEnabled = $false } } catch {}
+            if ($isLogon) {
                 $logon = $true
                 # 触发器整体 Enabled=False 时任务存在但永远不会随登录触发（任务自身的 State 可能仍是 Ready）
-                try { if ($tr.Enabled -eq $false) { $logonDisabled = $true } } catch {}
+                if (-not $trEnabled) { $logonDisabled = $true }
+            }
+            # v1.6.3 起重复兜底挂在单独的时间触发器上（启动器被人结束或放弃后由下一次重复拉回）。挂在登录触发器上的
+            # 重复不算：它只在那次登录触发之后才开始计时，而安装 / 升级都发生在登录之后，要等下次登录才有第一次重复
+            # （实测：登记后 NextRunTime 为空）。Repetition / Interval 读不到按「没有」处理，不抛异常
+            $hasRepeat = $false
+            try {
+                $rep = $tr.Repetition
+                if ($rep -and ("$([string]$rep.Interval)").Trim()) { $hasRepeat = $true }
+            } catch {}
+            if ($hasRepeat) {
+                if ($isLogon) { $logonRepeatOnly = $true } elseif ($trEnabled) { $timeRepeat = $true }
             }
         }
     } catch {}
     if (-not $logon) { $problems += '缺登录触发器' }
     if ($logonDisabled) { $problems += '登录触发器被禁用（Enabled=False，任务不会随登录触发）' }
+    if (-not $timeRepeat) {
+        if ($logonRepeatOnly) { $problems += '重复兜底只挂在登录触发器上（要等下次登录才生效），应另有一个每 5 分钟重复的时间触发器——请重新「一键安装」' }
+        else { $problems += '没有带重复兜底的时间触发器（v1.6.3 起应每 5 分钟重复）' }
+    }
     return @{ Ok = ($problems.Count -eq 0); Detail = ($problems -join '；') }
 }
 
@@ -226,9 +257,19 @@ function Test-TaskOwnedByOtherUser($Task, [string]$CurrentUserSid) {
 }
 
 function Get-TaskResultStatus([int]$Code) {
-    # 计划任务上次运行返回码：0 = 正常；267009 (0x41301) = 正在运行（启动器常驻期被查询时可能出现）也算正常
+    # 计划任务上次运行返回码：0 = 正常；267009 (0x41301) = 正在运行（任务跟踪启动器进程，看门狗常驻期被查询时即此值）也算正常
     if ($Code -eq 0 -or $Code -eq 267009) { return 'ok' }
     return 'warn'
+}
+
+function Get-ReadyStateNote([int]$LastTaskResult) {
+    # machine.task 在 State=Ready（任务当前没有在运行，看门狗不在运行）时附在文案后的说明，按上次运行结果分两种口径：
+    # 0 / 267009 = 刚结束过任务或查询口径内的正常值 → 提示 5 分钟内重复触发会拉回；
+    # 其他值 = 启动器已放弃（看门狗连续 3 次没能稳定运行），把启动器的退出码带出来并指向看门狗日志
+    if ($LastTaskResult -eq 0 -or $LastTaskResult -eq 267009) {
+        return '；任务当前没有在运行（看门狗不在运行）：若刚结束过任务，最多 5 分钟后重复触发会重新启动；否则请重新「一键安装」或手动启动任务'
+    }
+    return ("；任务当前没有在运行（看门狗不在运行）：上次运行结果 = {0}：启动器已放弃（看门狗连续 3 次没能稳定运行），请看 %TEMP%\AttachLinkWatchdog.log 里「启动器:」开头的行" -f $LastTaskResult)
 }
 
 # =====================================================================
@@ -415,7 +456,8 @@ if ($MyInvocation.InvocationName -ne '.') {
             Write-Hc 'machine.deploy' 'fail' ("机器级部署不完整：" + ($lack -join '、')) '重新「一键安装」补全机器级部署'
         }
 
-        # machine.task：任务存在性与配置（State=Ready 属正常——启动器不等待看门狗进程）
+        # machine.task：任务存在性与配置（任务直接运行无窗口启动器：看门狗运行期间 State=Running 属正常；
+        # State=Ready = 任务当前没有在运行、看门狗不在运行 → warn，说明按上次运行结果分两种口径）
         if ($taskUncertain) {
             Write-Hc 'machine.task' 'warn' "无法确认计划任务（查询失败：$taskQueryErr）" '稍后重试；持续失败请把健康检查结果发给维护者'
         } elseif ($skipMachine) {
@@ -425,14 +467,22 @@ if ($MyInvocation.InvocationName -ne '.') {
         } else {
             $cfg = Test-TaskConfig $task $MachineDir
             $stateNote = ''
-            if ("$($task.State)" -eq 'Ready') { $stateNote = '；任务状态 Ready 属正常（启动器不等待看门狗进程）' }
+            if ("$($task.State)" -eq 'Running') { $stateNote = '；任务在运行（启动器是任务的直接动作）' }
+            elseif ("$($task.State)" -eq 'Ready') {
+                $ltRes = 0
+                try { $ltRes = [int](Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop).LastTaskResult } catch { $ltRes = 0 }
+                $stateNote = Get-ReadyStateNote $ltRes
+            }
             $taskOwnerSid = ''
             try { $taskOwnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch {}
             if ($cfg.Ok -and (Test-TaskOwnedByOtherUser $task $taskOwnerSid)) {
                 # 任务登记账户 ≠ 当前用户：任务只在该账户登录时启动，当前用户登录时看门狗不会运行
                 Write-Hc 'machine.task' 'warn' ("计划任务登记的账户（$($task.Principal.UserId)）不是当前用户——任务只在该账户登录时启动，当前用户登录时看门狗不会运行" + $stateNote) '用当前登录账户的管理员身份重新「一键安装」部署'
+            } elseif ($cfg.Ok -and ("$($task.State)" -eq 'Ready')) {
+                # 配置正常但任务没有在运行 → warn（看门狗必然不在运行）
+                Write-Hc 'machine.task' 'warn' ("计划任务在位（登录触发 + 每 5 分钟重复兜底、最高权限、启动器指向 $MachineDir）" + $stateNote) '重新「一键安装」；反复出现就把看门狗日志发给维护者'
             } elseif ($cfg.Ok) {
-                Write-Hc 'machine.task' 'ok' ("计划任务在位（登录触发、最高权限、启动器指向 $MachineDir）" + $stateNote)
+                Write-Hc 'machine.task' 'ok' ("计划任务在位（登录触发 + 每 5 分钟重复兜底、最高权限、启动器指向 $MachineDir）" + $stateNote)
             } else {
                 Write-Hc 'machine.task' 'warn' ("计划任务存在但配置与预期不符：" + $cfg.Detail + $stateNote) '重新「一键安装」修正任务配置'
             }
@@ -472,14 +522,20 @@ if ($MyInvocation.InvocationName -ne '.') {
             }
         }
 
-        # machine.files：部署目录三件齐全
+        # machine.files：部署目录三件齐全（旧版遗留的 watchdog_launcher.vbs 只提示、不算失败）
         if ($skipMachine) {
             Write-Hc 'machine.files' 'skip' $machineSkipMsg
         } else {
-            $needFiles = @('AttachLink.xlam', 'watchdog.ps1', 'watchdog_launcher.vbs')
+            $needFiles = @('AttachLink.xlam', 'watchdog.ps1', 'AttachLink.WatchdogLauncher.exe')
             $missingFiles = @($needFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $MachineDir $_)) })
             if ($missingFiles.Count -eq 0) {
-                Write-Hc 'machine.files' 'ok' "机器级文件齐全（$($needFiles -join '、')）"
+                $legacyNote = ''
+                try {
+                    if (Test-Path -LiteralPath (Join-Path $MachineDir 'watchdog_launcher.vbs')) {
+                        $legacyNote = '；发现旧启动器 watchdog_launcher.vbs，重新「一键安装」会清掉'
+                    }
+                } catch {}
+                Write-Hc 'machine.files' 'ok' ("机器级文件齐全（$($needFiles -join '、')）" + $legacyNote)
             } else {
                 Write-Hc 'machine.files' 'fail' ("机器级文件缺失：" + ($missingFiles -join '、')) '重新「一键安装」补全机器级部署'
             }

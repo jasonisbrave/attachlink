@@ -4,7 +4,7 @@
 # A. 点源载入：主逻辑有守卫（不产生输出、不触碰环境），函数与协议计数可用；两个文件都是 UTF-8 with BOM
 # B. OPEN 条目识别与 build\install.ps1 对拍：同一批样本过两边同名函数，结果必须一致（防语义漂移）；
 #    OPEN 序列键名 ^OPEN(\d+)?$ 不误伤 OPENROAM 等诱饵键
-# C. 受信任路径比较 / 禁用形态 OPEN / 机器级部署门禁 / 任务配置（含 State=Disabled 与 Ready） / 任务返回码（纯函数，伪造对象）
+# C. 受信任路径比较 / 禁用形态 OPEN / 机器级部署门禁 / 任务配置（含 State=Disabled 与新旧动作、重复兜底） / 任务返回码（纯函数，伪造对象）
 # D. 心跳：年龄计算 + 等待刷新（临时文件 + 后台 Job 触碰）
 # E. DisabledItems 二进制值（含中文名边界）
 # F. 协议输出：制表符 / 换行清洗、计数、汇总行、退出码
@@ -40,7 +40,7 @@ Check ($dotOut.Count -eq 0) 'A 点源载入零输出（主逻辑有守卫，不�
 foreach ($fn in @('Write-Hc', 'Write-HcSummary', 'Get-HcExitCode', 'ConvertFrom-AddInEntry', 'Test-IsAttachLinkEntry',
                   'Test-IsLibraryEntry', 'Test-IsDisabledOpenValue', 'Test-DisabledItemsBlob', 'Test-SameTrustedPath',
                   'Get-MachineDeployState', 'Get-OfficeVersions', 'Get-LogAgeSeconds', 'Wait-Heartbeat', 'Get-LogLines',
-                  'Get-Hash16', 'Test-TaskConfig', 'Test-TaskOwnedByOtherUser', 'Get-TaskResultStatus')) {
+                  'Get-Hash16', 'Test-TaskConfig', 'Test-TaskOwnedByOtherUser', 'Get-TaskResultStatus', 'Get-ReadyStateNote')) {
     Check ([bool](Get-Command $fn -CommandType Function -ErrorAction SilentlyContinue)) "A 函数已载入：$fn"
 }
 
@@ -92,11 +92,15 @@ Check ((Get-MachineDeployState $true $false) -eq 'partial' -and (Get-MachineDepl
 
 $goodTask = [pscustomobject]@{
     Principal = [pscustomobject]@{ RunLevel = 'Highest' }
-    Actions   = @([pscustomobject]@{ Execute = 'wscript.exe'; Arguments = '"C:\Program Files\AttachLink\watchdog_launcher.vbs"' })
-    Triggers  = @([pscustomobject]@{ Enabled = $true })
+    Actions   = @([pscustomobject]@{ Execute = 'C:\Program Files\AttachLink\AttachLink.WatchdogLauncher.exe'; Arguments = '' })
+    Triggers  = @(
+        [pscustomobject]@{ Enabled = $true }
+        [pscustomobject]@{ Enabled = $true; Repetition = [pscustomobject]@{ Interval = 'PT5M'; Duration = 'P3650D'; StopAtDurationEnd = $false } }
+    )
 }
 $goodTask.Triggers[0].PSObject.TypeNames.Insert(0, 'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskLogonTrigger')
-Check ((Test-TaskConfig $goodTask 'C:\Program Files\AttachLink').Ok) 'C 任务配置：标准部署判 Ok'
+$goodTask.Triggers[1].PSObject.TypeNames.Insert(0, 'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTimeTrigger')
+Check ((Test-TaskConfig $goodTask 'C:\Program Files\AttachLink').Ok) 'C 任务配置：标准部署判 Ok（启动器为动作 + 登录触发器 + 每 5 分钟重复的时间触发器）'
 $badLevel = [pscustomobject]@{
     Principal = [pscustomobject]@{ RunLevel = 'Limited' }
     Actions   = $goodTask.Actions
@@ -105,10 +109,64 @@ $badLevel = [pscustomobject]@{
 Check (-not (Test-TaskConfig $badLevel 'C:\Program Files\AttachLink').Ok) 'C 任务配置：RunLevel 非 Highest → 不 Ok'
 $badAction = [pscustomobject]@{
     Principal = [pscustomobject]@{ RunLevel = 'Highest' }
-    Actions   = @([pscustomobject]@{ Execute = 'wscript.exe'; Arguments = '"D:\Elsewhere\watchdog_launcher.vbs"' })
+    Actions   = @([pscustomobject]@{ Execute = 'D:\Elsewhere\AttachLink.WatchdogLauncher.exe'; Arguments = '' })
     Triggers  = $goodTask.Triggers
 }
 Check (-not (Test-TaskConfig $badAction 'C:\Program Files\AttachLink').Ok) 'C 任务配置：启动器不在部署目录 → 不 Ok'
+$oldVbsAction = [pscustomobject]@{
+    Principal = [pscustomobject]@{ RunLevel = 'Highest' }
+    Actions   = @([pscustomobject]@{ Execute = 'wscript.exe'; Arguments = '"C:\Program Files\AttachLink\watchdog_launcher.vbs"' })
+    Triggers  = $goodTask.Triggers
+}
+$rOldVbs = Test-TaskConfig $oldVbsAction 'C:\Program Files\AttachLink'
+Check (-not $rOldVbs.Ok -and $rOldVbs.Detail.Contains('AttachLink.WatchdogLauncher.exe')) 'C 任务配置：旧 wscript+VBS 动作 → 不 Ok，提示指向启动器 exe'
+$argsAction = [pscustomobject]@{
+    Principal = [pscustomobject]@{ RunLevel = 'Highest' }
+    Actions   = @([pscustomobject]@{ Execute = 'C:\Program Files\AttachLink\AttachLink.WatchdogLauncher.exe'; Arguments = '-RestartDelaySeconds 10' })
+    Triggers  = $goodTask.Triggers
+}
+$rArgs = Test-TaskConfig $argsAction 'C:\Program Files\AttachLink'
+Check (-not $rArgs.Ok -and $rArgs.Detail.Contains('带了参数')) 'C 任务配置：动作带了参数 → 不 Ok'
+$noRepeatTask = [pscustomobject]@{
+    Principal = [pscustomobject]@{ RunLevel = 'Highest' }
+    Actions   = $goodTask.Actions
+    Triggers  = @([pscustomobject]@{ Enabled = $true })
+}
+$noRepeatTask.Triggers[0].PSObject.TypeNames.Insert(0, 'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskLogonTrigger')
+$rNoRep = Test-TaskConfig $noRepeatTask 'C:\Program Files\AttachLink'
+Check (-not $rNoRep.Ok -and $rNoRep.Detail.Contains('重复兜底')) 'C 任务配置：只有登录触发器（没有时间触发器）→ 不 Ok，提示「重复兜底」'
+$emptyRepTask = [pscustomobject]@{
+    Principal = [pscustomobject]@{ RunLevel = 'Highest' }
+    Actions   = $goodTask.Actions
+    Triggers  = @([pscustomobject]@{ Enabled = $true; Repetition = [pscustomobject]@{ Interval = ''; Duration = $null; StopAtDurationEnd = $false } })
+}
+$emptyRepTask.Triggers[0].PSObject.TypeNames.Insert(0, 'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskLogonTrigger')
+$rEmptyRep = Test-TaskConfig $emptyRepTask 'C:\Program Files\AttachLink'
+Check (-not $rEmptyRep.Ok -and $rEmptyRep.Detail.Contains('重复兜底')) 'C 任务配置：登录触发器上的重复间隔为空、没有时间触发器 → 不 Ok'
+# 2026-11-27 13:05 首次部署的形态：重复只挂在登录触发器上——它要到下次登录才开始计时，当前这次登录里没有兜底
+$logonRepeatTask = [pscustomobject]@{
+    Principal = [pscustomobject]@{ RunLevel = 'Highest' }
+    Actions   = $goodTask.Actions
+    Triggers  = @([pscustomobject]@{ Enabled = $true; Repetition = [pscustomobject]@{ Interval = 'PT5M'; Duration = 'P3650D'; StopAtDurationEnd = $false } })
+}
+$logonRepeatTask.Triggers[0].PSObject.TypeNames.Insert(0, 'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskLogonTrigger')
+$rLogonRep = Test-TaskConfig $logonRepeatTask 'C:\Program Files\AttachLink'
+Check (-not $rLogonRep.Ok -and $rLogonRep.Detail.Contains('只挂在登录触发器上')) 'C 任务配置：重复只挂在登录触发器上 → 不 Ok，提示另加时间触发器'
+# 时间触发器带重复但被禁用 → 不算兜底
+$offRepeatTask = [pscustomobject]@{
+    Principal = [pscustomobject]@{ RunLevel = 'Highest' }
+    Actions   = $goodTask.Actions
+    Triggers  = @($goodTask.Triggers[0], [pscustomobject]@{ Enabled = $false; Repetition = [pscustomobject]@{ Interval = 'PT5M'; Duration = 'P3650D'; StopAtDurationEnd = $false } })
+}
+$offRepeatTask.Triggers[1].PSObject.TypeNames.Insert(0, 'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTimeTrigger')
+Check (-not (Test-TaskConfig $offRepeatTask 'C:\Program Files\AttachLink').Ok) 'C 任务配置：带重复的时间触发器被禁用 → 不 Ok'
+# 顺序无关：时间触发器排在登录触发器前面同样判 Ok
+$reorderedTask = [pscustomobject]@{
+    Principal = [pscustomobject]@{ RunLevel = 'Highest' }
+    Actions   = $goodTask.Actions
+    Triggers  = @($goodTask.Triggers[1], $goodTask.Triggers[0])
+}
+Check ((Test-TaskConfig $reorderedTask 'C:\Program Files\AttachLink').Ok) 'C 任务配置：两个触发器顺序颠倒 → 仍 Ok'
 $noTrigger = [pscustomobject]@{
     Principal = [pscustomobject]@{ RunLevel = 'Highest' }
     Actions   = $goodTask.Actions
@@ -122,13 +180,25 @@ $disabledTask = [pscustomobject]@{
     State     = 'Disabled'
 }
 Check (-not (Test-TaskConfig $disabledTask 'C:\Program Files\AttachLink').Ok) 'C 任务配置：State=Disabled → 不 Ok（任务不会随登录拉起）'
+$runningTask = [pscustomobject]@{
+    Principal = [pscustomobject]@{ RunLevel = 'Highest' }
+    Actions   = $goodTask.Actions
+    Triggers  = $goodTask.Triggers
+    State     = 'Running'
+}
+Check ((Test-TaskConfig $runningTask 'C:\Program Files\AttachLink').Ok) 'C 任务配置：State=Running 且配置正确 → 配置判 Ok（machine.task 映射为 ok）'
 $readyTask = [pscustomobject]@{
     Principal = [pscustomobject]@{ RunLevel = 'Highest' }
     Actions   = $goodTask.Actions
     Triggers  = $goodTask.Triggers
     State     = 'Ready'
 }
-Check ((Test-TaskConfig $readyTask 'C:\Program Files\AttachLink').Ok) 'C 任务配置：State=Ready → Ok（启动器不等待看门狗进程，属正常）'
+Check ((Test-TaskConfig $readyTask 'C:\Program Files\AttachLink').Ok) 'C 任务配置：State=Ready 配置正常 → 配置判 Ok（machine.task 按新语义映射 warn，见 Get-ReadyStateNote）'
+$rReadyNote0 = Get-ReadyStateNote 0
+Check ($rReadyNote0.Contains('没有在运行') -and $rReadyNote0.Contains('最多 5 分钟后重复触发会重新启动')) 'C 任务状态说明：Ready 且返回码 0 → 文案含「没有在运行」与 5 分钟重复提示'
+Check ((Get-ReadyStateNote 267009).Contains('最多 5 分钟后重复触发会重新启动')) 'C 任务状态说明：Ready 且返回码 267009（运行中口径）→ 与 0 同文案分支'
+$rReadyNoteX = Get-ReadyStateNote 267014
+Check ($rReadyNoteX.Contains('上次运行结果 = 267014') -and $rReadyNoteX.Contains('启动器已放弃') -and $rReadyNoteX.Contains('启动器:')) 'C 任务状态说明：Ready 且其他返回码 → 文案含返回码、「启动器已放弃」与日志指引'
 # NB-1a：登录触发器存在但被禁用（Enabled=False，任务自身 State 可能仍是 Ready）→ 配置不正常
 $disTriggerTask = [pscustomobject]@{
     Principal = [pscustomobject]@{ RunLevel = 'Highest' }
@@ -270,7 +340,7 @@ try {
     [IO.File]::WriteAllText("$payloadDir\scripts\watchdog.ps1", 'dummy-wd-v1', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText("$machineDir\AttachLink.xlam", 'dummy-xlam-v1', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText("$machineDir\watchdog.ps1", 'dummy-wd-v1', [Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText("$machineDir\watchdog_launcher.vbs", 'dummy-vbs', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText("$machineDir\AttachLink.WatchdogLauncher.exe", 'dummy-launcher', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText("$machineDir\watchdog.conf", "ParentAllowlist=sjp7.exe`r`n", [Text.UTF8Encoding]::new($false))
     # 安装器日志（payload 上一级 = $g）
     [IO.File]::WriteAllText("$g\AttachLinkSetup.log", "===== AttachLinkSetup /install-all =====`r`n[结果] 一键安装完成（退出码 0）`r`n", [Text.UTF8Encoding]::new($false))
@@ -288,7 +358,7 @@ try {
     Check ((Get-St $p1 'machine.task') -eq 'fail') 'G1 machine.task：任务不存在 → fail'
     Check ((Get-St $p1 'machine.taskresult') -eq 'skip') 'G1 machine.taskresult：无任务 → skip'
     Check ((Get-St $p1 'machine.heartbeat') -eq 'ok') 'G1 machine.heartbeat：日志新鲜 → ok'
-    Check ((Get-St $p1 'machine.files') -eq 'ok') 'G1 machine.files：三件齐全 → ok'
+    Check ((Get-St $p1 'machine.files') -eq 'ok') 'G1 machine.files：三件齐全（xlam + watchdog + 启动器 exe）→ ok'
     Check ((Get-St $p1 'machine.version') -eq 'ok') 'G1 machine.version：与安装包一致 → ok'
     Check ((Get-St $p1 'machine.trusted') -eq 'fail') 'G1 machine.trusted：HKLM 无登记 → fail'
     $confItem = @($p1.Items | Where-Object { $_.Id -eq 'machine.conf' } | Select-Object -First 1)
@@ -314,6 +384,17 @@ try {
     Check ($p1.Summary -eq ("ok={0} warn={1} fail={2} skip={3} info={4}" -f $recount.ok, $recount.warn, $recount.fail, $recount.skip, $recount.info)) ('G1 SUMMARY 计数与逐项一致：' + $p1.Summary)
     # 只读核验：注入的注册表值原样未动
     Check ((Get-ItemProperty -LiteralPath "$officeRoot\16.0\Excel\Options").OPEN1 -eq '"AttachLink.xlam"') 'G1 只读：OPEN 值运行后原样'
+
+    # --- 场景 1b：部署目录残留旧启动器 watchdog_launcher.vbs → machine.files 仍 ok，文案提示「旧启动器」 ---
+    [IO.File]::WriteAllText("$machineDir\watchdog_launcher.vbs", 'dummy-legacy-vbs', [Text.UTF8Encoding]::new($false))
+    $out1b = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $hcPath `
+        -LogPath $gLog -PayloadDir $payloadDir -OfficeRootKey $officeRoot `
+        -TaskName 'AttachLinkHealthTest-NoSuchTask' -MachineDir $machineDir)
+    $p1b = Parse-HcOutput $out1b
+    $files1b = @($p1b.Items | Where-Object { $_.Id -eq 'machine.files' } | Select-Object -First 1)
+    Check ($files1b.Count -eq 1 -and $files1b[0].Status -eq 'ok' -and $files1b[0].Message.Contains('旧启动器')) 'G1b machine.files：残留旧启动器 vbs → 仍 ok 且文案含「旧启动器」'
+    Check ($files1b[0].Message.Contains('AttachLink.WatchdogLauncher.exe')) 'G1b machine.files：必需文件清单含启动器 exe'
+    Remove-Item "$machineDir\watchdog_launcher.vbs" -Force -ErrorAction SilentlyContinue
 
     # --- 场景 2：未部署机器级（无目录无任务）+ 用户级齐全 + 干净日志 → 机器级全 skip ---
     Remove-Item "$officeRoot\16.0\Excel\Options" -Recurse -Force -ErrorAction SilentlyContinue

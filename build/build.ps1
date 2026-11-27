@@ -1,7 +1,7 @@
 ﻿# =====================================================================
 # AttachLink.xlam 一键构建脚本
 # 用法: powershell -ExecutionPolicy Bypass -File build.ps1
-# 产物: ..\dist\AttachLink.xlam
+# 产物: ..\dist\AttachLink.xlam，以及 ..\dist\AttachLink.WatchdogLauncher.exe（看门狗的无窗口启动器，由 make-launcher.ps1 产出）
 # 说明:
 #   - 临时开启「信任访问 VBA 工程对象模型」(AccessVBOM)：在 try 内进行，
 #     任何异常都会走 finally 还原；支持 Office 2010(14.0)~2016+(16.0)
@@ -86,6 +86,9 @@ try {
     $ok = $excel.Run('AttachLink_SelfTest')
     $wbTest.Close($false)
     if (-not $ok) { throw '自检失败: AttachLink_SelfTest 返回 False' }
+
+    # ---- 看门狗启动器（v1.6.3）：与 xlam 一起产出，install-elevated.ps1 把它部署为计划任务的直接动作 ----
+    & (Join-Path $PSScriptRoot 'make-launcher.ps1') -OutputDir $OutputDir
 
     Write-Host "构建完成: $outXlam"
     Write-Host '自检通过: 模块编译正常。'

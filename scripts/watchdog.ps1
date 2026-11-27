@@ -85,7 +85,9 @@
 #
 # 部署：install-elevated.ps1（管理员）将本脚本复制到
 # C:\Program Files\AttachLink\ 并注册为登录计划任务（最高权限运行，
-# 可同时服务普通 Excel 与管理员权限的鼎信诺 Excel）。
+# 可同时服务普通 Excel 与管理员权限的鼎信诺 Excel）。v1.6.3 起计划任务的直接动作是同目录的
+# AttachLink.WatchdogLauncher.exe（无窗口启动器，源码 src\WatchdogLauncher.cs）：它启动本脚本并盯着它运行，
+# 本脚本异常退出 10 秒后拉起，连续 3 次没能稳定运行才放弃；启动器被结束时本脚本随它的作业对象一起结束。
 # =====================================================================
 param(
     [string]$XlamPath = (Join-Path $env:APPDATA 'Microsoft\AddIns\AttachLink.xlam'),

@@ -24,9 +24,11 @@ New-Item -ItemType Directory -Force -Path "$stage\dist", "$stage\scripts", "$sta
 $distXlam = Join-Path $root 'dist\AttachLink.xlam'
 if (-not (Test-Path $distXlam)) { throw "未找到 $distXlam，请先运行 build.ps1" }
 Copy-Item $distXlam "$stage\dist\AttachLink.xlam" -Force
+$distLauncher = Join-Path $root 'dist\AttachLink.WatchdogLauncher.exe'
+if (-not (Test-Path $distLauncher)) { throw "未找到 $distLauncher，请先运行 build.ps1" }
+Copy-Item $distLauncher "$stage\dist\AttachLink.WatchdogLauncher.exe" -Force
 Copy-Item (Join-Path $root 'scripts\setup.ps1')            "$stage\scripts\" -Force
 Copy-Item (Join-Path $root 'scripts\watchdog.ps1')         "$stage\scripts\" -Force
-Copy-Item (Join-Path $root 'scripts\watchdog_launcher.vbs') "$stage\scripts\" -Force
 Copy-Item (Join-Path $root 'scripts\healthcheck.ps1')       "$stage\scripts\" -Force
 Copy-Item (Join-Path $root 'build\install.ps1')            "$stage\build\" -Force
 Copy-Item (Join-Path $root 'build\install-elevated.ps1')   "$stage\build\" -Force
@@ -49,7 +51,7 @@ $addData = @(
     , @("$stage\dist\AttachLink.xlam", "payload\dist")
     , @("$stage\scripts\setup.ps1", "payload\scripts")
     , @("$stage\scripts\watchdog.ps1", "payload\scripts")
-    , @("$stage\scripts\watchdog_launcher.vbs", "payload\scripts")
+    , @("$stage\dist\AttachLink.WatchdogLauncher.exe", "payload\dist")
     , @("$stage\scripts\healthcheck.ps1", "payload\scripts")
     , @("$stage\build\install.ps1", "payload\build")
     , @("$stage\build\install-elevated.ps1", "payload\build")

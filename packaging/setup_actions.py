@@ -587,7 +587,7 @@ class _FileQueue:
 def selfcheck() -> int:
     pdir = payload_dir()
     need = ["VERSION.txt", "dist\\AttachLink.xlam", "scripts\\setup.ps1", "scripts\\watchdog.ps1",
-            "scripts\\watchdog_launcher.vbs", "scripts\\healthcheck.ps1", "build\\install.ps1",
+            "dist\\AttachLink.WatchdogLauncher.exe", "scripts\\healthcheck.ps1", "build\\install.ps1",
             "build\\install-elevated.ps1", "run-elevated.ps1", "elevated-capture.ps1"]
     missing = [n for n in need if not os.path.exists(os.path.join(pdir, n))]
     ver = read_version()

@@ -59,6 +59,9 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.6.3：预研基础第 3 步（不发版）——换掉 VBS 启动器：计划任务直接以无窗口启动器 AttachLink.WatchdogLauncher.exe
+'       为动作（看门狗异常退出后由启动器拉起，连续 3 次没能稳定运行才放弃；任务跟踪启动器，状态 Running）。
+'       本版 VBA 功能无变化，仅版本号
 ' 1.6.2：预研基础第 2 步（不发版）——看门狗只附着用户看得见的会话：Application.Visible 为假的隐藏 Excel（各类
 '       工具/脚本的后台实例、鼎信诺归档时另起的 Excel）不再被装载，等它变可见再处理。本版 VBA 功能无变化，仅版本号
 ' 1.6.1：预研基础第 1 步（不发版）——看门狗加固：附着失败按窗口退避（2、4、8、16 秒，封顶 30 秒）、
@@ -98,7 +101,7 @@ Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ■ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.6.2"
+Public Const ATTACHLINK_VERSION As String = "1.6.3"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"
