@@ -256,20 +256,38 @@ function Test-TaskOwnedByOtherUser($Task, [string]$CurrentUserSid) {
     } catch { return $false }
 }
 
-function Get-TaskResultStatus([int]$Code) {
-    # 计划任务上次运行返回码：0 = 正常；267009 (0x41301) = 正在运行（任务跟踪启动器进程，看门狗常驻期被查询时即此值）也算正常
-    if ($Code -eq 0 -or $Code -eq 267009) { return 'ok' }
+function Get-TaskResultCode($Value) {
+    # 把计划任务返回码归一成 0..4294967295 的整数：CIM 给的是无符号 32 位（如 2147946720），别处可能给同值的负数或字符串。
+    # 不能直接 [int] 强转——超过 2147483647 的值会抛溢出异常（2026-11-27 实测）。读不到返回 -1
+    try {
+        if ($null -eq $Value) { return [long]0 }
+        if ($Value -is [uint32]) { return [long]$Value }
+        if ($Value -is [int64]) { $v = [long]$Value }
+        else { $v = [long]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture) }
+    } catch { return [long]-1 }
+    if ($v -lt 0) { $v += 4294967296 }
+    return $v
+}
+
+function Get-TaskResultStatus($Code) {
+    # 计划任务上次运行返回码：
+    #   0 = 正常；267009 (0x41301) = 正在运行（任务跟踪启动器进程，看门狗常驻期被查询时即此值）；
+    #   2147946720 (0x800710E0) = 每 5 分钟的重复触发发现任务已在运行、新实例被忽略——看门狗运行满一个重复间隔后查到的
+    #   就是它，任务计划程序界面里显示为「操作员或管理员拒绝了请求」，属正常；其余 → warn
+    $u = Get-TaskResultCode $Code
+    if ($u -eq 0 -or $u -eq 267009 -or $u -eq 2147946720) { return 'ok' }
     return 'warn'
 }
 
-function Get-ReadyStateNote([int]$LastTaskResult) {
+function Get-ReadyStateNote($LastTaskResult) {
     # machine.task 在 State=Ready（任务当前没有在运行，看门狗不在运行）时附在文案后的说明，按上次运行结果分两种口径：
-    # 0 / 267009 = 刚结束过任务或查询口径内的正常值 → 提示 5 分钟内重复触发会拉回；
+    # 0 / 267009 / 2147946720（任务刚被结束，或重复触发被忽略时留下的值）→ 提示 5 分钟内重复触发会拉回；
     # 其他值 = 启动器已放弃（看门狗连续 3 次没能稳定运行），把启动器的退出码带出来并指向看门狗日志
-    if ($LastTaskResult -eq 0 -or $LastTaskResult -eq 267009) {
+    $u = Get-TaskResultCode $LastTaskResult
+    if ($u -eq 0 -or $u -eq 267009 -or $u -eq 2147946720) {
         return '；任务当前没有在运行（看门狗不在运行）：若刚结束过任务，最多 5 分钟后重复触发会重新启动；否则请重新「一键安装」或手动启动任务'
     }
-    return ("；任务当前没有在运行（看门狗不在运行）：上次运行结果 = {0}：启动器已放弃（看门狗连续 3 次没能稳定运行），请看 %TEMP%\AttachLinkWatchdog.log 里「启动器:」开头的行" -f $LastTaskResult)
+    return ("；任务当前没有在运行（看门狗不在运行）：上次运行结果 = {0}：启动器已放弃（看门狗连续 3 次没能稳定运行），请看 %TEMP%\AttachLinkWatchdog.log 里「启动器:」开头的行" -f $u)
 }
 
 # =====================================================================
@@ -470,7 +488,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             if ("$($task.State)" -eq 'Running') { $stateNote = '；任务在运行（启动器是任务的直接动作）' }
             elseif ("$($task.State)" -eq 'Ready') {
                 $ltRes = 0
-                try { $ltRes = [int](Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop).LastTaskResult } catch { $ltRes = 0 }
+                try { $ltRes = Get-TaskResultCode (Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop).LastTaskResult } catch { $ltRes = 0 }
                 $stateNote = Get-ReadyStateNote $ltRes
             }
             $taskOwnerSid = ''
@@ -496,9 +514,12 @@ if ($MyInvocation.InvocationName -ne '.') {
         } else {
             try {
                 $tinfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
-                $rc = [int]$tinfo.LastTaskResult
+                $rc = Get-TaskResultCode $tinfo.LastTaskResult
                 if ((Get-TaskResultStatus $rc) -eq 'ok') {
-                    Write-Hc 'machine.taskresult' 'ok' "计划任务上次运行结果正常（返回码 $rc）"
+                    $rcNote = ''
+                    if ($rc -eq 2147946720) { $rcNote = '，即 0x800710E0：重复触发时任务已在运行，新实例被忽略——任务计划程序里显示的「操作员或管理员拒绝了请求」就是这个，不是错误' }
+                    elseif ($rc -eq 267009) { $rcNote = '：正在运行' }
+                    Write-Hc 'machine.taskresult' 'ok' "计划任务上次运行结果正常（返回码 $rc$rcNote）"
                 } else {
                     Write-Hc 'machine.taskresult' 'warn' "计划任务上次运行返回码 $rc（0 为正常；上次运行时间 $($tinfo.LastRunTime)）" '看门狗未随任务启动时，重新「一键安装」或把日志发给维护者'
                 }

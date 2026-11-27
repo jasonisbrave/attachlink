@@ -40,7 +40,7 @@ Check ($dotOut.Count -eq 0) 'A 点源载入零输出（主逻辑有守卫，不�
 foreach ($fn in @('Write-Hc', 'Write-HcSummary', 'Get-HcExitCode', 'ConvertFrom-AddInEntry', 'Test-IsAttachLinkEntry',
                   'Test-IsLibraryEntry', 'Test-IsDisabledOpenValue', 'Test-DisabledItemsBlob', 'Test-SameTrustedPath',
                   'Get-MachineDeployState', 'Get-OfficeVersions', 'Get-LogAgeSeconds', 'Wait-Heartbeat', 'Get-LogLines',
-                  'Get-Hash16', 'Test-TaskConfig', 'Test-TaskOwnedByOtherUser', 'Get-TaskResultStatus', 'Get-ReadyStateNote')) {
+                  'Get-Hash16', 'Test-TaskConfig', 'Test-TaskOwnedByOtherUser', 'Get-TaskResultCode', 'Get-TaskResultStatus', 'Get-ReadyStateNote')) {
     Check ([bool](Get-Command $fn -CommandType Function -ErrorAction SilentlyContinue)) "A 函数已载入：$fn"
 }
 
@@ -213,6 +213,13 @@ Check (-not $rDisTr.Ok -and $rDisTr.Detail.Contains('触发器被禁用')) 'C �
 Check ((Get-TaskResultStatus 0) -eq 'ok') 'C 任务返回码：0 → ok'
 Check ((Get-TaskResultStatus 267009) -eq 'ok') 'C 任务返回码：0x41301（运行中）→ ok'
 Check ((Get-TaskResultStatus 1) -eq 'warn' -and (Get-TaskResultStatus -2147024894) -eq 'warn') 'C 任务返回码：其他 → warn'
+Check ((Get-TaskResultStatus 2147946720) -eq 'ok') 'C 任务返回码：2147946720（0x800710E0，重复触发时任务已在运行、新实例被忽略）→ ok'
+Check ((Get-TaskResultStatus 4294967295) -eq 'warn') 'C 任务返回码：4294967295（启动器以 -1 结束）→ warn'
+Check ((Get-TaskResultCode ([uint32]2147946720)) -eq 2147946720) 'C 任务返回码归一：无符号 32 位 2147946720 原样（不再 [int] 溢出）'
+Check ((Get-TaskResultCode -2147020576) -eq 2147946720) 'C 任务返回码归一：同值的负数 -2147020576 → 2147946720'
+Check ((Get-TaskResultCode '267009') -eq 267009 -and (Get-TaskResultCode $null) -eq 0 -and (Get-TaskResultCode 'abc') -eq -1) 'C 任务返回码归一：字符串 → 数值，空值 → 0，读不懂 → -1'
+Check ((Get-ReadyStateNote 2147946720).Contains('最多 5 分钟后重复触发会重新启动')) 'C 任务状态说明：Ready 且返回码 2147946720（重复触发被忽略）→ 与 0 同文案分支'
+Check ((Get-ReadyStateNote 4294967295).Contains('上次运行结果 = 4294967295')) 'C 任务状态说明：Ready 且 4294967295 → 带出退出码'
 
 # 任务登记账户 ≠ 当前用户（council C4：用别的管理员账号过 UAC 部署时任务绑错账户）：
 # UserId 可能是 SID 或 DOMAIN\user，统一换算成 SID 再比；任一侧读不到 → 不误报
