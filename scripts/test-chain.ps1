@@ -9,6 +9,8 @@
 #     与测试前完全一致；实例内 AddIns 的 Installed 不被看门狗改动）
 #   → 关后即退（被测看门狗全程存活；Quit 后脚本仍持着引用 5 秒）
 #   → 预热生命周期（被测看门狗空转 50 秒后再附着）
+# v1.6.2 起常驻看门狗不再附着隐藏实例：被测看门狗带 -AttachHiddenInstances（回归开关）。[1] 的实例是可见的，
+# 同版的常驻看门狗与被测看门狗都可能先完成装载（[4] 的两种来源都保留）；[7] 的实例是隐藏的，只能由被测看门狗附着。
 # 用法：powershell -ExecutionPolicy Bypass -File test-chain.ps1
 # 期望输出末行：RESULT: PASS
 # 注意：本文件含中文，必须保存为 UTF-8 with BOM（PS5.1 按 ANSI 误读无
@@ -250,7 +252,7 @@ try {
     # 被测看门狗与机器级常驻看门狗必须用同一份 xlam：二者会在 1 秒内先后附着同一实例，若各带一份不同的同名副本，
     # 后到者会再打开第二份、撞出「两份同名副本」的局面（实例随后退不干净）。
     $log1 = Join-Path $env:TEMP ('AttachLinkTestChain_wd_' + [guid]::NewGuid().ToString('N') + '.log')
-    $wd = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $log1), '-XlamPath', ('"{0}"' -f $trustedXlam)) -PassThru -WindowStyle Hidden
+    $wd = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $log1), '-XlamPath', ('"{0}"' -f $trustedXlam), '-AttachHiddenInstances') -PassThru -WindowStyle Hidden
 
     '[4] 轮询验证菜单与装载状态（最多 25 秒）'
     $deadline = (Get-Date).AddSeconds(25)
@@ -365,7 +367,7 @@ try {
         '    SKIP 预热生命周期检查：机器级常驻看门狗与被测脚本版本不一致（它的行为会混进结果），请先重新部署'
     } else {
         $log2 = Join-Path $env:TEMP ('AttachLinkTestChain_wd_' + [guid]::NewGuid().ToString('N') + '.log')
-        $wd2 = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $log2), '-XlamPath', ('"{0}"' -f $trustedXlam)) -PassThru -WindowStyle Hidden
+        $wd2 = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $log2), '-XlamPath', ('"{0}"' -f $trustedXlam), '-AttachHiddenInstances') -PassThru -WindowStyle Hidden
         '    被测看门狗空转 50 秒…'
         Start-Sleep -Seconds 50
         $xl2 = New-Object -ComObject Excel.Application        # 隐藏实例

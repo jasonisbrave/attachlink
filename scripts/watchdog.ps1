@@ -72,6 +72,11 @@
 # 可见」时重新评估（次数有上限），Win32 持续可见却没有新跳变的按低频只读重查（不设上限）——任何路径都不会
 # 让一个窗口被永久跳过。每次写操作（打开加载项 / 执行宏）之前都复核目标窗口仍然存在。
 #
+# 只附着用户看得见的会话（v1.6.2）：Application.Visible 为假的实例不再附着，每个周期只读一次它的可见性，
+# 变可见之后再按常规处理。AttachLink 是给人右键用的，用户看不见的 Excel 用不上右键菜单，往里装只有风险：
+# 鼎信诺归档在一个独立的隐藏 Excel 进程里做，旧版会对它发起附着（2026-11-27 实测，WORKLOG #35）。
+# 回归脚本用 -AttachHiddenInstances 回到旧规则（隐藏实例宽限一个周期后照常附着）；产品部署不带这个开关。
+#
 # 附着退避（v1.6.1）：某个文档窗口附着失败之后——宿主正忙（被呼叫方拒绝接收呼叫），或装载后没能确认初始化——
 # 按窗口退避：2、4、8、16 秒，之后封顶 30 秒；退避期内不向这个窗口发任何调用，别的窗口照常处理，成功一次即清零。
 # 旧版是固定等 800 毫秒后每个周期重试：鼎信诺归档期间 8 秒内对同一个进程被连续拒绝 3 次（2026-11-27 实测）。
@@ -96,7 +101,10 @@ param(
     [int]$HeartbeatSeconds = 30,
     # 日志路径。默认 %TEMP%\AttachLinkWatchdog.log；回归测试传入独立路径，
     # 避免与机器级常驻看门狗的日志交错。
-    [string]$LogFile = ''
+    [string]$LogFile = '',
+    # 仅供回归使用：隐藏实例（Application.Visible 为假）照旧附着（宽限一个周期）。产品部署不带这个开关——
+    # v1.6.2 起看门狗只附着用户看得见的会话：隐藏的自动化工作进程（如鼎信诺归档时另起的 Excel）不再被装载。
+    [switch]$AttachHiddenInstances
 )
 
 $ErrorActionPreference = 'Continue'
@@ -366,6 +374,23 @@ function Get-BackoffDelay([double]$prevSeconds, [double]$baseSeconds, [double]$m
     return $d
 }
 
+function Get-InstanceDecision([int]$appVisible, [bool]$allowHidden, $firstSeen, $now, [int]$intervalSeconds) {
+    # 实例可见性判定（v1.6.2：只附着用户看得见的会话）。纯函数，判定与调用方解耦，由 scripts\test-watchdog-units.ps1 回归。
+    #   appVisible：1 = Application.Visible 为真；0 = 为假；-1 = 读不到
+    #   返回 'attach'（按工作窗口处理）或 'defer'（本周期不处理、不标 seen，下周期再看）
+    # allowHidden（仅回归用）= 旧规则：不可见实例首次出现只记时间，宽限一个周期后照常处理；读不到按可见处理。
+    # 产品规则：看不见就不附着。AttachLink 是给人右键用的，用户看不见的 Excel 用不上右键菜单，往里装只有风险——
+    # 鼎信诺归档在一个独立的隐藏 Excel 进程里做，旧版会对它发起附着（2026-11-27 实测，WORKLOG #35）。
+    if ($appVisible -eq 1) { return 'attach' }
+    if ($allowHidden) {
+        if ($appVisible -lt 0) { return 'attach' }
+        if ($null -eq $firstSeen) { return 'defer' }
+        if (($now - [datetime]$firstSeen).TotalSeconds -lt $intervalSeconds) { return 'defer' }
+        return 'attach'
+    }
+    return 'defer'
+}
+
 function Get-HostUiState($app) {
     # 宿主两项界面设置的原值快照（看门狗装载前调用）。
     # Excel 在 Workbook_Open 事件处理结束时会把 DisplayAlerts / ScreenUpdating 一律复位为 True（2026-11-26 实测：
@@ -531,7 +556,7 @@ $cycle = 0
 $lastCount = -1               # 上次记入日志的 EXCEL7 窗口数（变化才记周期行）
 $lastBeat = Get-Date          # 上次记周期行/心跳的时刻
 $xlamMissing = $false         # xlam 缺失状态（仅状态切换时记日志，另配心跳）
-$hiddenSince = @{}            # 隐藏实例的首次见到时刻（pid → 时间）：宽限一个周期后再处理
+$hiddenSince = @{}            # 隐藏实例的首次见到时刻（pid → 时间）：产品规则下只用于「首次记一行、变可见时清掉」；-AttachHiddenInstances 下作宽限计时
 $hiddenWin = @{}              # 文档窗口在「隐藏判定」上的状态（窗口键 → New-WindowState），逻辑见 Get-HiddenDecision / Test-HiddenReevaluate
 $maxReeval = 3                # 已判定为隐藏的窗口因「Win32 由不可见变为可见」而立即重新评估的次数上限
 $hiddenRecheckSeconds = 30    # Win32 可见却没有新跳变时的低频只读重查间隔（秒）；不设次数上限，避免窗口被永久跳过
@@ -630,21 +655,27 @@ while ($true) {
                     }
                     $hiddenWin.Remove($key)      # Excel 报告为可见：按工作窗口处理
 
-                    # ---- 隐藏实例宽限一个周期 ----
-                    # 不可见的自动化实例（各类工具、测试脚本）往往寿命很短，或者会自己装载另一份同名加载项；
-                    # 看门狗抢在前面装载，轻则白做，重则两份同名副本相撞、宿主退不干净（2026-11-23 实测）。
-                    # 所以隐藏实例首次出现时先只记时间，下一个周期仍在才处理。可见实例（用户正在用的、
-                    # 鼎信诺拉起后显示出来的）不延迟。读不到 Visible 时按可见处理，不延迟。
-                    $visible = $true
-                    try { $visible = [bool]$app.Visible } catch { $visible = $true }
-                    if (-not $visible) {
-                        $first = $hiddenSince[[string]$winPid]
-                        if (-not $first) {
-                            $hiddenSince[[string]$winPid] = Get-Date
-                            WdLog ("隐藏实例，宽限一个周期再处理: pid=" + $winPid)
-                            continue
+                    # ---- 实例可见性（v1.6.2：只附着用户看得见的会话；判定在 Get-InstanceDecision 里）----
+                    # Application.Visible 为假的实例是隐藏的自动化实例：各类工具、测试脚本，以及鼎信诺归档时另起的那个 Excel。
+                    # 它们用不上右键菜单，往里装只有风险，所以不再附着，等它变可见再说（每个周期只读一次 Visible）。
+                    # 回归脚本用 -AttachHiddenInstances 回到旧规则（首次出现只记时间，宽限一个周期后照常处理）。
+                    $appVisible = -1
+                    try { $appVisible = [int][bool]$app.Visible } catch { $appVisible = -1 }
+                    $hvPidKey = [string]$winPid
+                    $decisionV = Get-InstanceDecision $appVisible $AttachHiddenInstances $hiddenSince[$hvPidKey] (Get-Date) $IntervalSeconds
+                    if ($decisionV -eq 'defer') {
+                        if ($null -eq $hiddenSince[$hvPidKey]) {
+                            $hiddenSince[$hvPidKey] = Get-Date
+                            if ($AttachHiddenInstances) { WdLog ("隐藏实例，宽限一个周期再处理: pid=" + $winPid) }
+                            elseif ($appVisible -eq 0) { WdLog ("隐藏实例，暂不附着（等它可见）: pid=" + $winPid) }
+                            else { WdLog ("实例可见性暂时无法确认，本周期不处理（下周期重试）: pid=" + $winPid) }
                         }
-                        if (((Get-Date) - $first).TotalSeconds -lt $IntervalSeconds) { continue }
+                        continue
+                    }
+                    if ($null -ne $hiddenSince[$hvPidKey]) {
+                        # 先前按隐藏记下的实例现在可见了：清掉记录；产品规则下记一行，说明从这一刻起开始处理
+                        $hiddenSince.Remove($hvPidKey)
+                        if (-not $AttachHiddenInstances) { WdLog ("先前隐藏的实例已可见，开始处理: pid=" + $winPid) }
                     }
 
                     # 父进程白名单：仅附着白名单进程拉起的 Excel（风险收敛，见仓库 Issue #1 / T13）
@@ -749,7 +780,7 @@ while ($true) {
                             try { $null = $app.Run($initMacro); $initOk = $true }
                             catch { WdLog ("Run AttachLink_Initialize 失败: " + $_.Exception.Message) }
                             $menuOk = $false
-                            try { $menuOk = [bool](Menu-Exists $app) } catch { WdLog ("装载后菜单读不到: " + $_.Exception.Message) }
+                            try { $menuOk = [bool](Menu-Exists $app) } catch { WdLog ("装载后菜单读不到（退避重试）: " + $_.Exception.Message) }
                             $ver = ''
                             if ($initOk -and $menuOk) {
                                 try { $ver = [string]$app.Run($versionMacro) } catch { $ver = '' }

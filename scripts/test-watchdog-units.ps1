@@ -19,9 +19,15 @@
 #    条目，安装前清掉指向其他路径的 AttachLink 登记、卸载时清掉全部；删 OPEN 条目后序列必须仍然连续。
 # G. 附着退避与成功判定（v1.6.1）：Get-BackoffDelay 纯函数逐条回归；主循环接线做静态断言（退避检查排在
 #    取 Application 之前、finally 里记账、窗口消失后清理；宏名限定到工作簿；初始化/菜单/版本三项齐备才标 seen）。
+# H. 实例可见性判定（v1.6.2）：Get-InstanceDecision 纯函数逐条回归（产品规则：看不见就不附着，过了多久都一样；
+#    回归开关 -AttachHiddenInstances 回到旧规则「宽限一个周期」）；主循环接线做静态断言（可见性判定排在在位
+#    判定之前、两条新日志文案在位、旧的「读不到 Visible 按可见处理」写法已移除）。
+# I. 隐藏实例不附着（真实 Excel，隐藏实例）：被测看门狗不带回归开关（产品规则），隐藏实例只被记「暂不附着」、
+#    不装载（实例里取不到加载项）；设为可见后记「已可见，开始处理」并照常装载。
 # 用法：powershell -ExecutionPolicy Bypass -File test-watchdog-units.ps1      期望末行 RESULT: PASS
-# 需要：桌面版 Excel（B、E 段用隐藏实例，不弹窗口）。本机常驻看门狗若与被测脚本版本不一致，B、E 段整段跳过
-#       （它会对同一实例做自己的动作，结果无法归因）。
+# 需要：桌面版 Excel（B、E、I 段用真实实例；B、E 段的实例是隐藏的，不弹窗口）。v1.6.2 起被测看门狗带
+#       -AttachHiddenInstances，B、E 段的隐藏实例由此照旧被装载（I 段专门用不带开关的被测看门狗验产品规则）。
+#       本机常驻看门狗若与被测脚本版本不一致，B、E、I 段整段跳过（它会对同一实例做自己的动作，结果无法归因）。
 # 清理约定：只按本测试记录下来的进程号结束自己拉起的 Excel，绝不按「测试期间新出现的 Excel 进程」批量清理
 #           ——那会误杀用户恰好在这时打开的 Excel。本测试碰过的 COM 对象都显式释放到计数归零，不依赖 GC
 #           （被枚举过的集合只靠 GC 回收不可靠，会把实例钉住，让「能退出」类的检查失真）。
@@ -85,8 +91,8 @@ if ((-not $AssumeSameVersion) -and (Test-Path $pfWd)) { $deployedDiffers = ((Get
 
 # ---------------------------------------------------------------------
 '=== D. 路径比较与 Release-Com 容错（纯函数）==='
-$fnText = Get-FunctionsText $wdPath @('Release-Com', 'Test-SamePath', 'Get-LoadedAddInPath', 'Get-PresenceDecision', 'Remove-DeadMenuControls', 'Menu-Exists', 'Get-HostUiState', 'Restore-HostUiState', 'Provision-App', 'New-WindowState', 'Get-HiddenDecision', 'Test-HiddenReevaluate', 'Get-BackoffDelay')
-Check ($fnText.Contains('function Release-Com') -and $fnText.Contains('function Test-SamePath') -and $fnText.Contains('function Get-LoadedAddInPath') -and $fnText.Contains('function Get-PresenceDecision') -and $fnText.Contains('function Remove-DeadMenuControls') -and $fnText.Contains('function Menu-Exists') -and $fnText.Contains('function Get-HostUiState') -and $fnText.Contains('function Restore-HostUiState') -and $fnText.Contains('function Provision-App') -and $fnText.Contains('function New-WindowState') -and $fnText.Contains('function Get-HiddenDecision') -and $fnText.Contains('function Test-HiddenReevaluate') -and $fnText.Contains('function Get-BackoffDelay')) '取到 watchdog.ps1 的相关函数'
+$fnText = Get-FunctionsText $wdPath @('Release-Com', 'Test-SamePath', 'Get-LoadedAddInPath', 'Get-PresenceDecision', 'Remove-DeadMenuControls', 'Menu-Exists', 'Get-HostUiState', 'Restore-HostUiState', 'Provision-App', 'New-WindowState', 'Get-HiddenDecision', 'Test-HiddenReevaluate', 'Get-BackoffDelay', 'Get-InstanceDecision')
+Check ($fnText.Contains('function Release-Com') -and $fnText.Contains('function Test-SamePath') -and $fnText.Contains('function Get-LoadedAddInPath') -and $fnText.Contains('function Get-PresenceDecision') -and $fnText.Contains('function Remove-DeadMenuControls') -and $fnText.Contains('function Menu-Exists') -and $fnText.Contains('function Get-HostUiState') -and $fnText.Contains('function Restore-HostUiState') -and $fnText.Contains('function Provision-App') -and $fnText.Contains('function New-WindowState') -and $fnText.Contains('function Get-HiddenDecision') -and $fnText.Contains('function Test-HiddenReevaluate') -and $fnText.Contains('function Get-BackoffDelay') -and $fnText.Contains('function Get-InstanceDecision')) '取到 watchdog.ps1 的相关函数'
 . ([scriptblock]::Create($fnText))
 $XlamPath = 'C:\Program Files\AttachLink\AttachLink.xlam'      # A 段假对象场景用的「看门狗配置的那一份」
 $script:wdLog = New-Object System.Collections.Generic.List[string]
@@ -121,6 +127,25 @@ Check ($wdText.Contains('if ($attachFailed) {') -and $wdText.Contains('$backoff[
 Check ($wdText.Contains('foreach ($k in @($backoff.Keys)) { if (-not $liveKeys.ContainsKey($k)) { $backoff.Remove($k) } }')) '窗口消失后清理它的退避记录'
 Check (-not $wdText.Contains('Start-Sleep -Milliseconds 800')) '不再用固定 800 毫秒等待（由按窗口退避取代）'
 Check ($wdText.Contains('（退避重试）') -and $wdText.Contains('WdLog ("附着失败 hwnd="')) '失败日志仍带「退避重试」字样（健康检查按它归类自愈类重试）'
+
+# ---------------------------------------------------------------------
+'=== H. 实例可见性判定（v1.6.2：只附着用户看得见的会话；纯函数 + 主循环接线静态断言）==='
+# appVisible：1 可见、0 不可见、-1 读不到。产品规则：看不见就不附着；回归开关 allowHidden = 旧规则。
+$ivT0 = Get-Date '2026-11-27 10:00:00'
+Check ((Get-InstanceDecision 1 $false $null $ivT0 2) -eq 'attach') '实例可见：直接处理'
+Check ((Get-InstanceDecision 0 $false $null $ivT0 2) -eq 'defer') '实例不可见（产品规则）：不附着，哪怕刚出现'
+Check ((Get-InstanceDecision 0 $false $ivT0 ($ivT0.AddSeconds(3600)) 2) -eq 'defer') '实例不可见：过了很久也不附着（不再是「宽限一个周期」）'
+Check ((Get-InstanceDecision -1 $false $null $ivT0 2) -eq 'defer') '可见性读不到（产品规则）：不附着，下周期再看'
+Check ((Get-InstanceDecision 1 $true $null $ivT0 2) -eq 'attach') '回归开关：可见实例照常处理'
+Check ((Get-InstanceDecision 0 $true $null $ivT0 2) -eq 'defer') '回归开关：不可见实例首次出现只记时间'
+Check ((Get-InstanceDecision 0 $true $ivT0 ($ivT0.AddSeconds(1)) 2) -eq 'defer') '回归开关：宽限期（一个周期）内不处理'
+Check ((Get-InstanceDecision 0 $true $ivT0 ($ivT0.AddSeconds(2)) 2) -eq 'attach') '回归开关：宽限一个周期后照旧处理'
+Check ((Get-InstanceDecision -1 $true $null $ivT0 2) -eq 'attach') '回归开关：可见性读不到按可见处理（旧行为）'
+Check ($wdText.Contains('[switch]$AttachHiddenInstances')) '回归开关是脚本参数（产品部署不带）'
+Check ($wdText.Contains('$decisionV = Get-InstanceDecision $appVisible $AttachHiddenInstances $hiddenSince[$hvPidKey] (Get-Date) $IntervalSeconds')) '主循环用 Get-InstanceDecision 判定实例可见性'
+Check ($wdText.IndexOf('$decisionV = Get-InstanceDecision $appVisible') -lt $wdText.IndexOf('$presence = Get-PresenceDecision $true $lookupState $samePath')) '可见性判定排在在位判定之前：不可见的实例不会走到装载'
+Check ($wdText.Contains('隐藏实例，暂不附着（等它可见）: pid=') -and $wdText.Contains('先前隐藏的实例已可见，开始处理: pid=')) '两条新日志文案在位'
+Check (-not $wdText.Contains('$visible = $true')) '旧的「读不到 Visible 按可见处理」写法已移除'
 
 # ---------------------------------------------------------------------
 '=== A. 看门狗装载判定（假对象，不依赖 Excel）==='
@@ -852,7 +877,9 @@ Remove-Item $f2dir -Recurse -Force -ErrorAction SilentlyContinue
 $trusted = $XlamPath
 if (-not (Test-Path $trusted)) { $trusted = Join-Path $env:APPDATA 'Microsoft\AddIns\AttachLink.xlam' }
 function Start-TestWatchdog([string]$Log) {
-    return (Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $Log), '-XlamPath', ('"{0}"' -f $trusted)) -PassThru -WindowStyle Hidden)
+    # v1.6.2 起被测看门狗带 -AttachHiddenInstances（回归开关，回到旧规则）：B、E 段用隐藏实例模拟
+    # 「鼎信诺拉起的 Excel」，常驻规则（不带开关）下它们不再被装载。产品部署不带这个开关。
+    return (Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $Log), '-XlamPath', ('"{0}"' -f $trusted), '-AttachHiddenInstances') -PassThru -WindowStyle Hidden)
 }
 function Get-WdLogLines([string]$Log) {
     # 用「允许读写共享」的方式读：被测看门狗正往日志追加的那一瞬间，按只读共享打开会撞上
@@ -1114,6 +1141,55 @@ if ($deployedDiffers) {
         }
     } finally {
         if ($wd -and -not $wd.HasExited) { try { Stop-Process -Id $wd.Id -Force } catch {} }
+    }
+}
+
+# ---------------------------------------------------------------------
+'=== I. 隐藏实例不附着（真实 Excel，v1.6.2）==='
+# 产品规则回归：被测看门狗不带 -AttachHiddenInstances，隐藏实例只被记「暂不附着（等它可见）」、不被装载；
+# 设为可见后记「先前隐藏的实例已可见，开始处理」并照常装载。同版常驻看门狗（若有）在实例变可见后也可能
+# 抢先装载——在位路径或被测看门狗日志，两种证据都算通过。
+$wdI = $null; $testPidI = [uint32]0
+if ($deployedDiffers) {
+    '    SKIP I 段：机器级常驻看门狗与被测脚本版本不一致，它会对同一实例做自己的动作，结果无法归因（请先重新部署）'
+} else {
+    $xl = $null; $wbs = $null
+    $log = Join-Path $base 'wd-i.log'
+    try {
+        # 被测看门狗不带 -AttachHiddenInstances（产品部署形态），独立日志，与其他段同一份可信副本
+        $wdI = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $log), '-XlamPath', ('"{0}"' -f $trusted)) -PassThru -WindowStyle Hidden
+        $xl = New-Object -ComObject Excel.Application           # 隐藏实例：不弹窗口
+        [void][AttachLinkUnitsPid]::GetWindowThreadProcessId([IntPtr][long]$xl.Hwnd, [ref]$testPidI)
+        $wbs = $xl.Workbooks
+        $null = $wbs.Add()
+        Start-Sleep -Seconds 12                                 # 留若干个周期：隐藏实例只被记「暂不附着」
+        $linesI = @(Get-WdLogLines $log | Where-Object { $_ -match ('pid=' + $testPidI + '\b') })
+        Check (@($linesI | Where-Object { $_ -match ('隐藏实例，暂不附着（等它可见）: pid=' + $testPidI + '\b') }).Count -ge 1) 'I 隐藏实例被记「暂不附着（等它可见）」'
+        Check (@($linesI | Where-Object { $_ -match '已装载并初始化|已在位，无需装载|装载失败|附着失败' }).Count -eq 0) 'I 等待期内没有装载 / 已在位 / 失败类记录（隐藏实例未被附着）'
+        $notfound = $false
+        try { $null = $wbs.Item('AttachLink.xlam') } catch { $notfound = $true }
+        Check $notfound 'I 实例里取不到 AttachLink.xlam（0x8002000B 无效索引：加载项未被装载）'
+
+        $xl.Visible = $true                                     # 变可见：桌面上会短暂出现一个 Excel 窗口
+        $resumedI = Wait-LogLine $log ('先前隐藏的实例已可见，开始处理: pid=' + $testPidI + '\b') 15
+        Check ($resumedI -ge 1) 'I 变可见后看门狗记录「先前隐藏的实例已可见，开始处理」'
+        $loadedI = $false
+        $deadlineI = (Get-Date).AddSeconds(30)
+        while ((Get-Date) -lt $deadlineI -and -not $loadedI) {
+            Start-Sleep -Milliseconds 500
+            if (Test-TrustedLoaded $wbs) { $loadedI = $true }
+            else { $loadedI = (@(Get-WdLogLines $log | Where-Object { $_ -match ('pid=' + $testPidI + '\b') -and $_ -match '已装载并初始化|已在位，无需装载' }).Count -ge 1) }
+        }
+        if ($loadedI) { 'pass: I 实例可见后照常装载（在位路径 = 配置路径，或被测看门狗已记装载 / 已在位）' } else { Check $false 'I 实例可见后没有装载证据（在位路径与日志里都没有）' }
+    } catch {
+        Check $false "I 段执行异常: $($_.Exception.Message.Split("`n")[0])"
+    } finally {
+        if ($wdI -and -not $wdI.HasExited) { try { Stop-Process -Id $wdI.Id -Force } catch {} }
+        if ($null -ne $xl) { Close-Instance $xl $wbs }
+        $xl = $null; $wbs = $null
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+        Wait-OwnExit $testPidI 10
+        Stop-OwnProcess $testPidI 'I 段拉起的 Excel'
     }
 }
 

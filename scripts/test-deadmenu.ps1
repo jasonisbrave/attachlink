@@ -15,6 +15,9 @@
 # 随后在看门狗日志里等「按未装载处理」「已删除死菜单控件」「已装载并初始化」三行，并在实例内核实 SelfTest
 # 可用、一级菜单恰好是 5 个正式项。最后新起实例核实缓存已清。
 #
+# v1.6.2 起常驻看门狗不再附着隐藏实例：装载改由本脚本自己启动的被测看门狗完成（带 -AttachHiddenInstances 回到
+# 旧规则，独立日志）；下文所说「看门狗日志」自闸检查之后均指这份独立日志，常驻看门狗的主日志只用于运行前的闸。
+#
 # ■ 本脚本是「任何测试 / 探针都不得创建非临时的 AttachLinkCtx 控件」这条红线（开发交接 3.3 第 9 条与
 #   3.5 节）的【唯一受控例外】——它测的就是非临时残留；换成临时控件，第 ④ 步的断言就没有判别力
 #   （临时控件本来就不会进缓存，2026-11-26 实测）。受控措施：
@@ -268,6 +271,22 @@ if ($runningExcel.Count -gt 0) {
     $script:ok = $false
 }
 
+# ---- 启动被测看门狗（v1.6.2 起常驻看门狗不再附着隐藏实例，装载由它完成）----
+# 带 -AttachHiddenInstances（回归开关，隐藏实例照旧附着——本测试的实例就是隐藏的，且靠它有一个周期的宽限
+# 来抢放占位控件）；-XlamPath 与常驻看门狗同一份可信副本。启动后把 Get-WdLogLines 读取的 $wdLog 改指这份
+# 独立日志：闸检查已经用主日志做完了，之后的等待逻辑原样可用、只针对被测看门狗。
+$testWd = $null
+$testWdLog = Join-Path $env:TEMP ('AttachLinkTestDeadMenu_wd_' + [guid]::NewGuid().ToString('N') + '.log')
+try {
+    $testWd = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $testWdLog), '-XlamPath', ('"{0}"' -f $trustedXlam), '-AttachHiddenInstances') -PassThru -WindowStyle Hidden
+} catch {
+    Check $false ('被测看门狗启动失败: ' + $_.Exception.Message)
+}
+$wdLog = $testWdLog
+$logWaitUntil = (Get-Date).AddSeconds(10)
+while (-not (Test-Path $wdLog) -and (Get-Date) -lt $logWaitUntil) { Start-Sleep -Milliseconds 500 }
+if (-not (Test-Path $wdLog)) { Check $false ('被测看门狗的独立日志 10 秒内未出现（' + $wdLog + '），后续等待必然失败') }
+
 $placeholder = 'AttachLink 死菜单占位（仅测试）'
 $expectedTop = @('插入附件链接（可多选）', '插入文件夹引用', '插入底稿引用', '归档迁移（批量）', '附件管理')
 
@@ -417,6 +436,13 @@ try {
     # 异常路径的兜底：核实并清理缓存，任何情况下都不留下占位控件
     try { $nx = Invoke-CacheCheck; if ($null -ne $nx -and $nx -gt 0) { Say ('    （异常兜底）已清理缓存里的残留控件 {0} 个' -f $nx) } } catch { Say ('    （异常兜底）缓存检查也失败了: ' + $_.Exception.Message) }
 }
+
+# ---- 收尾：结束本脚本启动的被测看门狗（按自己记下的进程号；闸之后的路径一定执行到这里）----
+if ($testWd -and -not $testWd.HasExited) {
+    try { Stop-Process -Id $testWd.Id -Force } catch {}
+    Say ('    （收尾）已结束被测看门狗 pid=' + $testWd.Id)
+}
+if ($ok) { Remove-Item $testWdLog -Force -ErrorAction SilentlyContinue }   # PASS 才删日志；FAIL 时留在 %TEMP% 供排查
 
 $leftExcel = @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue)
 if ($leftExcel.Count -gt 0) { Say ('留意：运行结束后仍有 EXCEL.EXE 在运行: ' + (($leftExcel | ForEach-Object { $_.Id }) -join ', ') + '（未处理。本脚本只按自己记录的进程号结束自己拉起的实例，不会结束其它 Excel；请确认这些是否为本测试遗留）') }
