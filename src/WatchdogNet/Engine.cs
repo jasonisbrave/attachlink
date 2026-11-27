@@ -34,6 +34,7 @@ namespace AttachLink.Watchdog
         private readonly HashSet<string> _deadMenuLogged = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> _filter = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private DateTime? _lastPresenceUnknownLog;
+        private bool _windowFailed;                       // AttachWindow 得出「没能确认初始化」的结论 → 本窗口按退避重试
         private int _cycle;
         private int _lastCount = -1;
         private DateTime _lastBeat;
@@ -72,9 +73,10 @@ namespace AttachLink.Watchdog
             }
         }
 
-        public int RunDiag()
+        /// <summary>跑若干周期后退出（--diag 只读诊断、--once 手动装载）。启动行标明模式。</summary>
+        public int Run(string modeLabel)
         {
-            _log.Log((_readOnly ? "看门狗启动（只读诊断）" : "看门狗启动") + ", pid=" + Process.GetCurrentProcess().Id + ", xlam=" + _opt.XlamPath);
+            _log.Log("看门狗启动" + (modeLabel.Length > 0 ? "（" + modeLabel + "）" : "") + ", pid=" + Process.GetCurrentProcess().Id + ", xlam=" + _opt.XlamPath);
             DateTime start = DateTime.Now;
             while (true)
             {
@@ -148,6 +150,7 @@ namespace AttachLink.Watchdog
         private void ProcessWindow(long h)
         {
             uint winPid = Native.GetWindowProcessId(h);
+            if (_opt.OnlyPid > 0 && winPid != (uint)_opt.OnlyPid) return;      // --once -Pid：只处理指定进程
             string key = h + ":" + winPid;
             DateTime now = DateTime.Now;
             if (_seen.Contains(key))
@@ -192,7 +195,9 @@ namespace AttachLink.Watchdog
                     scope.Release(win);      // Window 对象用完即释放，不留给 GC
                 }
                 if (app == null) { _log.Log("hwnd=" + h + " 未取得 Application"); return; }
+                _windowFailed = false;
                 AttachWindow(h, winPid, key, app, winVisible, scope, now);
+                attachFailed = _windowFailed;
             }
             catch (Exception ex)
             {
@@ -326,7 +331,8 @@ namespace AttachLink.Watchdog
                 deadMenu = true;
             }
 
-            // ---- 从这里起是写操作（删除死菜单控件 / 打开加载项 / 执行宏）。写之前复核目标窗口仍在 ----
+            // ---- 从这里起是写操作（删除死菜单控件 / 打开加载项 / 执行宏 / 写回宿主设置）。写之前复核目标窗口仍在：
+            // 宿主若已开始退出，文档窗口首当其冲被销毁，此时再动命令栏或 Open / Run 会打断退出流程 ----
             if (!Native.IsWindowAlive(h)) return;
             if (_readOnly)
             {
@@ -342,7 +348,183 @@ namespace AttachLink.Watchdog
                 }
                 return;
             }
-            _log.Log("常驻装载尚未实现（切片 C）: hwnd=" + h + " pid=" + winPid);
+
+            if (deadMenu)
+            {
+                // 死菜单根除：装载之前先从外部删掉残留控件（为什么必须从外部删见 RemoveDeadMenuControls）。
+                // 删不掉不影响本周期装载——装载后的初始化仍会在会话内清掉死菜单，缓存留待下个实例再试。
+                int deadRemoved = RemoveDeadMenuControls(app, scope);
+                if (deadRemoved > 0) _log.Log("已删除死菜单控件 " + deadRemoved + " 个（实例正常退出后不再写入命令栏缓存）: hwnd=" + h + " pid=" + winPid);
+                else if (deadRemoved == 0) _log.Log("未找到可删除的死菜单控件（期间已被其它方清理），继续装载: hwnd=" + h + " pid=" + winPid);
+                else _log.Log("死菜单控件暂未删除（宿主正忙，命令栏不可访问），本周期仍照常装载，缓存留待下个实例再试: hwnd=" + h + " pid=" + winPid);
+            }
+
+            string provState, foreignPath;
+            if (Provision(app, scope, out provState, out foreignPath))
+            {
+                Debug("Provision 结论=" + provState + "；目标窗口仍在=" + Native.IsWindowAlive(h));
+                if (provState == "trusted" && !Native.IsWindowAlive(h))
+                {
+                    // 装载期间目标窗口已消失（宿主开始退出）：不执行宏、不标记 seen
+                    _log.Log("装载后目标窗口已消失（宿主正在退出），不执行初始化: hwnd=" + h + " pid=" + winPid);
+                }
+                else if (provState == "trusted")
+                {
+                    // 只有确认在位的那份就是 $XlamPath 本身，才执行初始化（显式正向判断，不靠排除法）。
+                    // 成功判定从严（v1.6.1）：初始化宏执行成功、菜单 Tag 在位、版本宏返回非空，三者齐备才标 seen。
+                    bool initOk = false;
+                    try { Com.Call(app, "Run", InitMacro); initOk = true; }
+                    catch (Exception ex) { _log.Log("Run AttachLink_Initialize 失败: " + ex.Message); }
+                    bool menuOk = false;
+                    try { menuOk = MenuExists(app, scope); }
+                    catch (Exception ex) { _log.Log("装载后菜单读不到（退避重试）: " + ex.Message); }
+                    string ver = "";
+                    if (initOk && menuOk) { try { object v = Com.Call(app, "Run", VersionMacro); ver = v == null ? "" : v.ToString(); } catch { ver = ""; } }
+                    if (initOk && menuOk && ver.Length > 0)
+                    {
+                        _seen.Add(key);
+                        _log.Log("已装载并初始化: hwnd=" + h + " pid=" + winPid + " 版本=v" + ver);
+                    }
+                    else
+                    {
+                        // 没能确认就不标 seen，按退避重试
+                        _windowFailed = true;
+                        _log.Log("装载后未能确认初始化（初始化" + (initOk ? "成功" : "失败") + "、菜单" + (menuOk ? "在位" : "不在位")
+                            + "、版本" + (ver.Length > 0 ? ver : "读不到") + "），下轮重试: hwnd=" + h + " pid=" + winPid + "（退避重试）");
+                    }
+                }
+                else if (provState == "unknown")
+                {
+                    // 无法确认在位情况（宿主繁忙 / 路径不可读）：不打开、不执行宏，也不标记 seen，下个周期重试
+                    _log.Log("无法确认在位的 AttachLink.xlam（查询出错或路径不可读），本周期不处理: hwnd=" + h + " pid=" + winPid);
+                }
+                else
+                {
+                    // foreign：宿主里是一份异路径的同名副本；mismatch：打开后复核不符。都不打开第二份、不执行宏，对该窗口不再重试
+                    _seen.Add(key);
+                    if (provState == "mismatch") _log.Log("打开后复核不符（在位的不是看门狗配置的那份），不执行宏: hwnd=" + h + " pid=" + winPid + " 在位=" + foreignPath);
+                    else _log.Log("同名异路径副本已装载且未初始化，不执行其宏、不打开第二份，跳过: hwnd=" + h + " pid=" + winPid + " 副本=" + foreignPath);
+                }
+            }
+        }
+
+        private const string InitMacro = "'AttachLink.xlam'!AttachLink_Initialize";       // 宏名限定到工作簿（v1.6.1）
+        private const string VersionMacro = "'AttachLink.xlam'!AttachLink_GetVersion";
+
+        private sealed class HostUiState { public bool? Alerts; public bool? Screen; }
+
+        /// <summary>宿主两项界面设置的原值快照（装载前调用）。读不到的项保持 null，恢复时跳过。</summary>
+        private static HostUiState GetHostUiState(object app)
+        {
+            HostUiState s = new HostUiState();
+            try { object v = Com.Get(app, "DisplayAlerts"); if (v != null) s.Alerts = Convert.ToBoolean(v, CultureInfo.InvariantCulture); } catch { }
+            try { object v = Com.Get(app, "ScreenUpdating"); if (v != null) s.Screen = Convert.ToBoolean(v, CultureInfo.InvariantCulture); } catch { }
+            return s;
+        }
+
+        /// <summary>把宿主的 DisplayAlerts / ScreenUpdating 恢复成装载前的值；某项没读到时不恢复该项。直接写回、不先比较。</summary>
+        private static void RestoreHostUiState(object app, HostUiState state)
+        {
+            if (state == null) return;
+            try { if (state.Alerts.HasValue) Com.Set(app, "DisplayAlerts", state.Alerts.Value); } catch { }
+            try { if (state.Screen.HasValue) Com.Set(app, "ScreenUpdating", state.Screen.Value); } catch { }
+        }
+
+        /// <summary>只装载、不登记（v1.6.0，R1）——移植 Provision-App。返回 true = 已得出确定结论（provState：trusted / foreign / mismatch / unknown），
+        /// false = 打开过程出错（已记日志，provState = failed）。只有 trusted 允许执行初始化宏。</summary>
+        private bool Provision(object app, ComScope scope, out string provState, out string foreignPath)
+        {
+            object wbs = null, wb = null; HostUiState uiState = null;
+            provState = "failed"; foreignPath = "";
+            bool done = false;
+            try
+            {
+                wbs = scope.Track(Com.Get(app, "Workbooks"));
+                LookupState ls; string detail;
+                string loaded = GetLoadedAddInPath(wbs, Decisions.AddInName, scope, out ls, out detail);
+                if (ls == LookupState.Error) provState = "unknown";
+                else if (ls == LookupState.Found)
+                {
+                    // 已有同名加载项在位：不打开第二份，只判定它是不是配置的那一份
+                    if (Decisions.SamePath(loaded, _opt.XlamPath)) provState = "trusted";
+                    else { provState = "foreign"; foreignPath = loaded; }
+                }
+                else
+                {
+                    if (_opt.DebugLog) Debug("三态查询=" + ls + " " + detail + "；宿主设置 " + DescribeHostUi(app));
+                    // 明确不在位：从配置路径打开（只装载、不登记）
+                    uiState = GetHostUiState(app);
+                    System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+                    wb = scope.Track(Com.Call(wbs, "Open", _opt.XlamPath));
+                    Debug("Workbooks.Open 返回，耗时 " + sw.ElapsedMilliseconds + " ms");
+                    // 打开后立即复核：在位的那份必须就是配置的那一份（检查与打开之间宿主可能已装入同名副本）
+                    string opened = "";
+                    try { object f = Com.Get(wb, "FullName"); opened = f == null ? "" : f.ToString(); } catch (HostException ex) { Debug("FullName 读不到: " + ex.Message); opened = ""; }
+                    Debug("打开后在位副本=[" + opened + "] 配置路径=[" + _opt.XlamPath + "] 同一份=" + Decisions.SamePath(opened, _opt.XlamPath));
+                    if (Decisions.SamePath(opened, _opt.XlamPath)) provState = "trusted";
+                    else { provState = "mismatch"; foreignPath = opened; }
+                }
+                done = true;
+            }
+            catch (Exception ex)
+            {
+                _log.Log("装载失败（Workbooks.Open）: " + ex.Message);
+            }
+            finally
+            {
+                // 恢复放在 finally：复核不符要恢复，Workbooks.Open 中途抛错（事件可能已经跑完）同样要恢复；没走到打开这一步则不碰
+                if (uiState != null) { RestoreHostUiState(app, uiState); Debug("宿主设置已写回"); }
+                scope.Release(wb); scope.Release(wbs);
+            }
+            return done;
+        }
+
+        private void Debug(string message)
+        {
+            if (_opt.DebugLog) _log.Log("[调试] " + message);
+        }
+
+        private static string DescribeHostUi(object app)
+        {
+            HostUiState s = GetHostUiState(app);
+            return "DisplayAlerts=" + (s.Alerts.HasValue ? s.Alerts.Value.ToString() : "读不到") + " ScreenUpdating=" + (s.Screen.HasValue ? s.Screen.Value.ToString() : "读不到");
+        }
+
+        /// <summary>死菜单根除（v1.6.0 R2）：从外部删除 Cell 命令栏上带 AttachLinkCtx 标签的控件，返回删掉的个数；
+        /// -1 = 一个都没删成、且存在读不到 / 删不掉的控件（调用方按「暂未删除、稍后重试」处理）。</summary>
+        private static int RemoveDeadMenuControls(object app, ComScope scope)
+        {
+            int removed = 0, failed = 0;
+            object bars = null, bar = null, ctrls = null, ctrl = null;
+            try
+            {
+                bars = scope.Track(Com.Get(app, "CommandBars"));
+                bar = scope.Track(Com.GetOrInvoke(bars, "Item", "Cell"));
+                ctrls = scope.Track(Com.Get(bar, "Controls"));
+                object nRaw = Com.Get(ctrls, "Count");
+                if (nRaw == null) removed = -1;            // 控件数读不到：显式按「不可访问」处理，不能当成 0 个控件
+                else
+                {
+                    int n = Convert.ToInt32(nRaw, CultureInfo.InvariantCulture);
+                    for (int i = n; i >= 1; i--)           // 倒序：删除不改变尚未遍历部分的下标
+                    {
+                        ctrl = null;
+                        try
+                        {
+                            ctrl = scope.Track(Com.GetOrInvoke(ctrls, "Item", i));
+                            object tag = Com.Get(ctrl, "Tag");
+                            if (tag == null) failed++;      // 读不到的那个可能就是死菜单，不能当成「无标签」放过
+                            else if (string.Equals(tag.ToString(), Decisions.MenuTag, StringComparison.Ordinal)) { Com.Call(ctrl, "Delete"); removed++; }
+                        }
+                        catch (Exception) { failed++; }     // 取不到该控件，或读 Tag / 删除时抛异常（宿主繁忙）：跳过它
+                        finally { scope.Release(ctrl); }
+                    }
+                }
+            }
+            catch (Exception) { removed = -1; }
+            finally { scope.Release(ctrl); scope.Release(ctrls); scope.Release(bar); scope.Release(bars); }
+            if (removed == 0 && failed > 0) return -1;
+            return removed;
         }
 
         private static int ToCount(object v)

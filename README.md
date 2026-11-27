@@ -516,7 +516,7 @@ excel-attach-addin/
 │   ├── AttachLink.bas               # 主模块源码（全部功能 + 顶部配置区）
 │   ├── AttachLink.ThisWorkbook.vba  # ThisWorkbook 事件代码（保存时链接归一化）
 │   ├── WatchdogLauncher.cs           # 无窗口启动器源码（构建为 dist\AttachLink.WatchdogLauncher.exe，计划任务的直接动作）
-│   ├── WatchdogNet/                 # .NET 看门狗源码（预研基础第 5 步；目前只有只读诊断 --diag 与内置回归 --selftest，由 build\make-watchdog.ps1 构建为 dist\AttachLink.Watchdog.exe，尚未部署）
+│   ├── WatchdogNet/                 # .NET 看门狗源码（预研基础第 5 步；目前有只读诊断 --diag、手动装载 --once 与内置回归 --selftest，由 build\make-watchdog.ps1 构建为 dist\AttachLink.Watchdog.exe，尚未部署）
 │   └── AttachLinkShim.cs            # 📦 归档：已废弃的 COM 引导器路线，不再编译
 ├── build/
 │   ├── build.ps1                    # 构建 → dist/AttachLink.xlam

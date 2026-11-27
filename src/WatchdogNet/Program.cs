@@ -26,6 +26,9 @@ namespace AttachLink.Watchdog
         public long LogMaxBytes = Logger.DefaultMaxBytes;
         public bool SelfTest;
         public bool Diag;
+        public bool Once;                                   // 手动装载一次（切片 B）
+        public int OnlyPid;                                 // 配合 --once：只处理这个 Excel 进程（-Pid）
+        public bool DebugLog;                               // -DebugLog：记「[调试]」细节行（排障用）
         public int WatchSeconds;
 
         public static Options Parse(string[] args)
@@ -56,7 +59,10 @@ namespace AttachLink.Watchdog
                     case "attachhiddeninstances": o.AttachHiddenInstances = attached == null ? true : ParseBool(attached, name); break;
                     case "selftest": o.SelfTest = true; break;
                     case "diag": o.Diag = true; break;
+                    case "once": o.Once = true; break;
+                    case "pid": o.OnlyPid = ParseInt(value(), name); break;
                     case "watch": o.WatchSeconds = ParseInt(value(), name); break;
+                    case "debuglog": o.DebugLog = attached == null ? true : ParseBool(attached, name); break;
                     default: throw new ArgumentException("不认识的参数: " + a);
                 }
             }
@@ -81,13 +87,17 @@ namespace AttachLink.Watchdog
     internal static class Program
     {
         public const string Usage =
-            "AttachLink.Watchdog（预研基础第 5 步 · 切片 A：只读诊断）\n" +
+            "AttachLink.Watchdog（预研基础第 5 步 · 切片 A / B：只读诊断与手动装载；常驻模式尚未启用）\n" +
             "用法：\n" +
             "  AttachLink.Watchdog.exe --selftest\n" +
             "      内置单元回归（判定纯函数、日志轮转、参数解析），末行 RESULT: PASS / FAIL\n" +
-            "  AttachLink.Watchdog.exe --diag [-watch 秒] [-XlamPath 路径] [-LogFile 路径] [-IntervalSeconds 秒]\n" +
-            "      [-MaxCycles 次] [-ParentAllowlist 名单] [-HeartbeatSeconds 秒] [-AttachHiddenInstances]\n" +
+            "  AttachLink.Watchdog.exe --diag [-watch 秒] [-MaxCycles 次] [选项]\n" +
             "      只读诊断：按与 PowerShell 版相同的规则给出每个 Excel 文档窗口的判定并写日志，不做任何写操作\n" +
+            "  AttachLink.Watchdog.exe --once [-Pid 进程号] [-watch 秒] [选项]\n" +
+            "      手动装载一次：对可见的 Excel 工作窗口执行一次完整装载（删死菜单 → 打开加载项 → 初始化 → 三项验证 →\n" +
+            "      恢复宿主设置），然后退出。隐藏实例、异路径副本、非 Excel 宿主都不碰\n" +
+            "  选项（名字与 PowerShell 版相同）：-XlamPath 路径 -LogFile 路径 -IntervalSeconds 秒 -ParentAllowlist 名单\n" +
+            "      -HeartbeatSeconds 秒 -AttachHiddenInstances（仅回归用）\n" +
             "常驻模式在切片 C 才启用。";
 
         [STAThread]
@@ -103,11 +113,17 @@ namespace AttachLink.Watchdog
                 return 2;
             }
             if (o.SelfTest) return SelfTest.Run();
-            if (o.Diag)
+            if (o.Diag && o.Once)
+            {
+                Console.WriteLine("参数错误: --diag 与 --once 不能同时给");
+                return 2;
+            }
+            if (o.Diag || o.Once)
             {
                 string logPath = o.LogFile.Length > 0 ? o.LogFile : Path.Combine(Path.GetTempPath(), "AttachLinkWatchdog.log");
                 Logger logger = new Logger(logPath, o.LogMaxBytes, true);
-                return new Engine(o, logger, true).RunDiag();
+                if (o.Diag) return new Engine(o, logger, true).Run("只读诊断");
+                return new Engine(o, logger, false).Run("手动装载一次");
             }
             Console.WriteLine(Usage);
             return 2;

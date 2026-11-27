@@ -240,6 +240,15 @@ namespace AttachLink.Watchdog
                 for (int i = 0; i < argc; i++) Marshal.GetNativeVariantForObject(args[argc - 1 - i] ?? System.Reflection.Missing.Value, block + VariantSize * i);
                 dp.rgvarg = block; dp.cArgs = (uint)argc;
             }
+            // PROPERTYPUT：按 COM 的规矩，接收赋值的那个参数要用 DISPID_PROPERTYPUT(-3) 命名——不带它 Excel 会直接崩掉
+            //（2026-11-27 实测：0x800706BE「远程过程调用失败」，宿主进程消失，文档窗口随之不见）
+            IntPtr named = IntPtr.Zero;
+            if ((flags & DispatchPropertyPut) != 0 && argc > 0)
+            {
+                named = Marshal.AllocCoTaskMem(IntPtr.Size);
+                Marshal.WriteIntPtr(named, new IntPtr(-3));
+                dp.rgdispidNamedArgs = named; dp.cNamedArgs = 1;
+            }
             int excepSize = Marshal.SizeOf(typeof(EXCEPINFO));
             IntPtr result = Marshal.AllocCoTaskMem(VariantSize);
             IntPtr pExcep = Marshal.AllocCoTaskMem(excepSize);
@@ -270,6 +279,7 @@ namespace AttachLink.Watchdog
             }
             finally
             {
+                if (named != IntPtr.Zero) Marshal.FreeCoTaskMem(named);
                 Marshal.FreeCoTaskMem(result); Marshal.FreeCoTaskMem(pExcep);
                 if (block != IntPtr.Zero) Marshal.FreeCoTaskMem(block);
             }
