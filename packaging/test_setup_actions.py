@@ -12,6 +12,12 @@ import tempfile
 spec = importlib.util.spec_from_file_location("setup_actions", os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup_actions.py"))
 sa = importlib.util.module_from_spec(spec); spec.loader.exec_module(sa)
 
+# 全局打桩「卸载收尾清理」：本文件任何一个用例都不真去删 %TEMP% 里的看门狗日志、不清真实的更新临时目录。
+# 2026-11-27 实测：下面「卸载成功 → OK」那个用例会走到 _uninstall_cleanup_tmp，把开发机上常驻看门狗的日志删掉
+# （文件后半段只有一处局部打桩，没有覆盖到这里）。
+_cleanup_calls = []
+sa._uninstall_cleanup_tmp = lambda: _cleanup_calls.append(1)
+
 class Q:
     def __init__(self): self.lines = []
     def put(self, x): self.lines.append(x)
@@ -650,7 +656,7 @@ class _ScriptRunner:
             def run_elevated(self, target): return next(seq["run_elevated"])
         return R
 
-# 打桩收尾清理，避免测试真去删 %TEMP% 里的看门狗日志 / 更新临时目录
+# 这一段原本在这里局部打桩收尾清理；文件开头已改为全局打桩（见那里的注释），这里保留为双保险
 _saved_cleanup = sa._uninstall_cleanup_tmp
 sa._uninstall_cleanup_tmp = lambda: None
 try:
@@ -776,5 +782,7 @@ check(all(fn == "save_gui_log_snapshot" and has_target for fn, has_target in _gu
 check(hasattr(sg, "save_gui_log_snapshot"), "setup_gui：模块级辅助函数 save_gui_log_snapshot 存在")
 
 
+
+check(len(_cleanup_calls) >= 1, "卸载成功的用例走到了收尾清理（文件开头已全局打桩：不碰真实 %TEMP% 的看门狗日志与更新临时目录）")
 
 print("RESULT:", "PASS" if ok else "FAIL")
