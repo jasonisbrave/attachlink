@@ -89,6 +89,8 @@ try {
 
     # ---- 看门狗启动器（v1.6.3）：与 xlam 一起产出，install-elevated.ps1 把它部署为计划任务的直接动作 ----
     & (Join-Path $PSScriptRoot 'make-launcher.ps1') -OutputDir $OutputDir
+    # ---- .NET 看门狗（预研基础第 5 步）：切片 A 只有只读诊断；常驻模式要到切片 C 才启用 ----
+    & (Join-Path $PSScriptRoot 'make-watchdog.ps1') -OutputDir $OutputDir
 
     Write-Host "构建完成: $outXlam"
     Write-Host '自检通过: 模块编译正常。'
