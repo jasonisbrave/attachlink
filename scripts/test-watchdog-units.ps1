@@ -17,6 +17,8 @@
 #    显示出来之后才处理。
 # F. 加载项列表登记清理（build\install.ps1，临时注册表键，不依赖 Excel）：Excel 的加载项列表按文件名识别
 #    条目，安装前清掉指向其他路径的 AttachLink 登记、卸载时清掉全部；删 OPEN 条目后序列必须仍然连续。
+# G. 附着退避与成功判定（v1.6.1）：Get-BackoffDelay 纯函数逐条回归；主循环接线做静态断言（退避检查排在
+#    取 Application 之前、finally 里记账、窗口消失后清理；宏名限定到工作簿；初始化/菜单/版本三项齐备才标 seen）。
 # 用法：powershell -ExecutionPolicy Bypass -File test-watchdog-units.ps1      期望末行 RESULT: PASS
 # 需要：桌面版 Excel（B、E 段用隐藏实例，不弹窗口）。本机常驻看门狗若与被测脚本版本不一致，B、E 段整段跳过
 #       （它会对同一实例做自己的动作，结果无法归因）。
@@ -83,8 +85,8 @@ if ((-not $AssumeSameVersion) -and (Test-Path $pfWd)) { $deployedDiffers = ((Get
 
 # ---------------------------------------------------------------------
 '=== D. 路径比较与 Release-Com 容错（纯函数）==='
-$fnText = Get-FunctionsText $wdPath @('Release-Com', 'Test-SamePath', 'Get-LoadedAddInPath', 'Get-PresenceDecision', 'Remove-DeadMenuControls', 'Menu-Exists', 'Get-HostUiState', 'Restore-HostUiState', 'Provision-App', 'New-WindowState', 'Get-HiddenDecision', 'Test-HiddenReevaluate')
-Check ($fnText.Contains('function Release-Com') -and $fnText.Contains('function Test-SamePath') -and $fnText.Contains('function Get-LoadedAddInPath') -and $fnText.Contains('function Get-PresenceDecision') -and $fnText.Contains('function Remove-DeadMenuControls') -and $fnText.Contains('function Menu-Exists') -and $fnText.Contains('function Get-HostUiState') -and $fnText.Contains('function Restore-HostUiState') -and $fnText.Contains('function Provision-App') -and $fnText.Contains('function New-WindowState') -and $fnText.Contains('function Get-HiddenDecision') -and $fnText.Contains('function Test-HiddenReevaluate')) '取到 watchdog.ps1 的相关函数'
+$fnText = Get-FunctionsText $wdPath @('Release-Com', 'Test-SamePath', 'Get-LoadedAddInPath', 'Get-PresenceDecision', 'Remove-DeadMenuControls', 'Menu-Exists', 'Get-HostUiState', 'Restore-HostUiState', 'Provision-App', 'New-WindowState', 'Get-HiddenDecision', 'Test-HiddenReevaluate', 'Get-BackoffDelay')
+Check ($fnText.Contains('function Release-Com') -and $fnText.Contains('function Test-SamePath') -and $fnText.Contains('function Get-LoadedAddInPath') -and $fnText.Contains('function Get-PresenceDecision') -and $fnText.Contains('function Remove-DeadMenuControls') -and $fnText.Contains('function Menu-Exists') -and $fnText.Contains('function Get-HostUiState') -and $fnText.Contains('function Restore-HostUiState') -and $fnText.Contains('function Provision-App') -and $fnText.Contains('function New-WindowState') -and $fnText.Contains('function Get-HiddenDecision') -and $fnText.Contains('function Test-HiddenReevaluate') -and $fnText.Contains('function Get-BackoffDelay')) '取到 watchdog.ps1 的相关函数'
 . ([scriptblock]::Create($fnText))
 $XlamPath = 'C:\Program Files\AttachLink\AttachLink.xlam'      # A 段假对象场景用的「看门狗配置的那一份」
 $script:wdLog = New-Object System.Collections.Generic.List[string]
@@ -97,6 +99,28 @@ Check (-not (Test-SamePath 'C:\A\AttachLink.xlam' 'relative\AttachLink.xlam')) '
 $threw = $false
 try { Release-Com ([pscustomobject]@{ X = 1 }); Release-Com $null; Release-Com 'string' } catch { $threw = $true }
 Check (-not $threw) 'Release-Com 对非 COM 对象 / $null 不抛异常'
+
+# ---------------------------------------------------------------------
+'=== G. 附着退避与成功判定（v1.6.1：纯函数 + 主循环接线静态断言）==='
+# 间隔：首次取一个周期（2 秒），之后逐次翻倍，封顶 30 秒；prev<=0 视为首次；base 大于 max 时以 max 为准。
+Check ((Get-BackoffDelay 0 2 30) -eq 2) '首次失败：间隔取一个周期（2 秒）'
+Check ((Get-BackoffDelay 2 2 30) -eq 4) '第二次失败：间隔翻倍（4 秒）'
+Check ((Get-BackoffDelay 8 2 30) -eq 16) '第三次之后继续翻倍（8 → 16 秒）'
+Check ((Get-BackoffDelay 16 2 30) -eq 30) '间隔到上限后不再增长（16 → 30，而非 32）'
+Check ((Get-BackoffDelay 30 2 30) -eq 30) '已在上限：保持 30 秒'
+Check ((Get-BackoffDelay -5 2 30) -eq 2) 'prev 为负数按首次处理'
+Check ((Get-BackoffDelay 0 5 3) -eq 3) 'base 大于 max 时以 max 为准'
+Check ((Get-BackoffDelay 3 5 30) -eq 6) 'prev 小于 base 时照常翻倍（3 → 6），不回退'
+$wdText = [IO.File]::ReadAllText($wdPath)
+Check ($wdText.Contains('$initMacro = "''AttachLink.xlam''!AttachLink_Initialize"') -and $wdText.Contains('$versionMacro = "''AttachLink.xlam''!AttachLink_GetVersion"')) '宏名限定到工作簿（初始化与版本两个宏）'
+Check (-not $wdText.Contains("Run('AttachLink_Initialize')") -and -not $wdText.Contains("Run('AttachLink_GetVersion')")) '主循环不再使用不带工作簿名的宏名'
+Check ($wdText.Contains('if ($initOk -and $menuOk -and $ver)') -and $wdText.Contains('try { $null = $app.Run($initMacro); $initOk = $true }')) '成功判定：初始化、菜单、版本三者齐备才标 seen'
+$boGate = 'if ($null -ne $bo -and (Get-Date) -lt $bo.until) { continue }'
+Check ($wdText.Contains($boGate) -and $wdText.IndexOf($boGate) -lt $wdText.IndexOf('GetApplicationFromWindow($h, [ref]$winVisible)')) '退避检查排在取 Application 之前：退避期内不向宿主发调用'
+Check ($wdText.Contains('if ($attachFailed) {') -and $wdText.Contains('$backoff[$key] = @{ until = (Get-Date).AddSeconds($boNextDelay); delay = $boNextDelay }') -and $wdText.Contains('$backoff.Remove($key)')) 'finally 里记账：失败排下次可试的时刻，得出非失败的结论即清零'
+Check ($wdText.Contains('foreach ($k in @($backoff.Keys)) { if (-not $liveKeys.ContainsKey($k)) { $backoff.Remove($k) } }')) '窗口消失后清理它的退避记录'
+Check (-not $wdText.Contains('Start-Sleep -Milliseconds 800')) '不再用固定 800 毫秒等待（由按窗口退避取代）'
+Check ($wdText.Contains('（退避重试）') -and $wdText.Contains('WdLog ("附着失败 hwnd="')) '失败日志仍带「退避重试」字样（健康检查按它归类自愈类重试）'
 
 # ---------------------------------------------------------------------
 '=== A. 看门狗装载判定（假对象，不依赖 Excel）==='

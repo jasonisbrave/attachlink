@@ -72,6 +72,12 @@
 # 可见」时重新评估（次数有上限），Win32 持续可见却没有新跳变的按低频只读重查（不设上限）——任何路径都不会
 # 让一个窗口被永久跳过。每次写操作（打开加载项 / 执行宏）之前都复核目标窗口仍然存在。
 #
+# 附着退避（v1.6.1）：某个文档窗口附着失败之后——宿主正忙（被呼叫方拒绝接收呼叫），或装载后没能确认初始化——
+# 按窗口退避：2、4、8、16 秒，之后封顶 30 秒；退避期内不向这个窗口发任何调用，别的窗口照常处理，成功一次即清零。
+# 旧版是固定等 800 毫秒后每个周期重试：鼎信诺归档期间 8 秒内对同一个进程被连续拒绝 3 次（2026-11-27 实测）。
+# 成功判定从严（v1.6.1）：初始化宏执行成功、菜单 Tag 在位、版本宏返回非空，三者齐备才标「已装载并初始化」
+# 并不再处理该窗口；缺任何一项都记一行并按上面的退避重试。宏名限定到工作簿（'AttachLink.xlam'!宏名）。
+#
 # 部署：install-elevated.ps1（管理员）将本脚本复制到
 # C:\Program Files\AttachLink\ 并注册为登录计划任务（最高权限运行，
 # 可同时服务普通 Excel 与管理员权限的鼎信诺 Excel）。
@@ -351,6 +357,15 @@ function Test-HiddenReevaluate($st, [bool]$shownNow, $now, [int]$maxReeval, [int
     return $true
 }
 
+function Get-BackoffDelay([double]$prevSeconds, [double]$baseSeconds, [double]$maxSeconds) {
+    # 附着失败后的下次重试间隔（秒）：首次取 base，之后逐次翻倍，封顶 max。纯函数，判定与调用方解耦，
+    # 由 scripts\test-watchdog-units.ps1 逐条回归。prevSeconds <= 0 视为首次；base 大于 max 时以 max 为准。
+    $d = if ($prevSeconds -gt 0) { $prevSeconds * 2 } else { $baseSeconds }
+    if ($d -lt $baseSeconds) { $d = $baseSeconds }
+    if ($d -gt $maxSeconds) { $d = $maxSeconds }
+    return $d
+}
+
 function Get-HostUiState($app) {
     # 宿主两项界面设置的原值快照（看门狗装载前调用）。
     # Excel 在 Workbook_Open 事件处理结束时会把 DisplayAlerts / ScreenUpdating 一律复位为 True（2026-11-26 实测：
@@ -521,6 +536,10 @@ $hiddenWin = @{}              # 文档窗口在「隐藏判定」上的状态（
 $maxReeval = 3                # 已判定为隐藏的窗口因「Win32 由不可见变为可见」而立即重新评估的次数上限
 $hiddenRecheckSeconds = 30    # Win32 可见却没有新跳变时的低频只读重查间隔（秒）；不设次数上限，避免窗口被永久跳过
 $lastPresenceUnknownLog = $null   # 上次记「菜单在位但无法确认装载状态」日志的时刻（限频 60 秒一行，全局一条）
+$backoff = @{}                  # 附着退避表（v1.6.1）：窗口键 → @{ until = 下次可试时刻; delay = 本次间隔秒数 }，间隔见 Get-BackoffDelay
+$backoffMaxSeconds = 30         # 退避间隔上限（秒）
+$initMacro = "'AttachLink.xlam'!AttachLink_Initialize"       # 宏名限定到工作簿（v1.6.1）
+$versionMacro = "'AttachLink.xlam'!AttachLink_GetVersion"
 
 while ($true) {
     $cycle++
@@ -573,7 +592,12 @@ while ($true) {
                     continue
                 }
 
+                # ---- 附着退避（v1.6.1）：这个窗口上一次附着失败后，退避期内不向宿主发任何调用 ----
+                $bo = $backoff[$key]
+                if ($null -ne $bo -and (Get-Date) -lt $bo.until) { continue }
+
                 $app = $null
+                $attachFailed = $false
                 try {
                     $winVisible = [int]-1
                     $app = [AttachLinkWatchdog.Native]::GetApplicationFromWindow($h, [ref]$winVisible)
@@ -718,16 +742,25 @@ while ($true) {
                             WdLog ("装载后目标窗口已消失（宿主正在退出），不执行初始化: hwnd=" + $h + " pid=" + $winPid)
                         } elseif ($script:provState -eq 'trusted') {
                             # 只有确认在位的那份就是 $XlamPath 本身，才执行初始化（显式正向判断，不靠排除法）。
-                            # xlam 装载发生在工作簿打开之后，初始化时序已错过，补一次（幂等）。
-                            try { $null = $app.Run('AttachLink_Initialize') }
+                            # 显式补一次初始化（幂等）：不能依赖加载项的 Workbook_Open 一定执行过——事件关闭时它不执行，
+                            # 已装载时 Workbooks.Open 返回现有工作簿、也不再触发。
+                            # 成功判定从严（v1.6.1）：初始化宏执行成功、菜单 Tag 在位、版本宏返回非空，三者齐备才标 seen。
+                            $initOk = $false
+                            try { $null = $app.Run($initMacro); $initOk = $true }
                             catch { WdLog ("Run AttachLink_Initialize 失败: " + $_.Exception.Message) }
-                            if (Menu-Exists $app) {
+                            $menuOk = $false
+                            try { $menuOk = [bool](Menu-Exists $app) } catch { WdLog ("装载后菜单读不到: " + $_.Exception.Message) }
+                            $ver = ''
+                            if ($initOk -and $menuOk) {
+                                try { $ver = [string]$app.Run($versionMacro) } catch { $ver = '' }
+                            }
+                            if ($initOk -and $menuOk -and $ver) {
                                 $seen[$key] = $true
-                                $ver = ""
-                                try { $ver = $app.Run('AttachLink_GetVersion') } catch {}
-                                WdLog ("已装载并初始化: hwnd=" + $h + " pid=" + $winPid + $(if ($ver) { " 版本=v" + $ver } else { "" }))
+                                WdLog ("已装载并初始化: hwnd=" + $h + " pid=" + $winPid + " 版本=v" + $ver)
                             } else {
-                                WdLog ("装载后未检测到菜单, hwnd=" + $h + " pid=" + $winPid + "（下轮重试）")
+                                # 没能确认就不标 seen，按退避重试。旧写法是初始化失败后只要菜单在位就算成功，版本只用于日志。
+                                $attachFailed = $true
+                                WdLog ("装载后未能确认初始化（初始化" + $(if ($initOk) { '成功' } else { '失败' }) + "、菜单" + $(if ($menuOk) { '在位' } else { '不在位' }) + "、版本" + $(if ($ver) { $ver } else { '读不到' }) + "），下轮重试: hwnd=" + $h + " pid=" + $winPid + "（退避重试）")
                             }
                         } elseif ($script:provState -eq 'unknown') {
                             # 无法确认在位情况（宿主繁忙 / 路径不可读）：不打开、不执行宏，也不标记 seen，下个周期重试
@@ -744,8 +777,8 @@ while ($true) {
                         }
                     }
                 } catch {
+                    $attachFailed = $true
                     WdLog ("附着失败 hwnd=" + $h + " : " + $_.Exception.Message + "（退避重试）")
-                    Start-Sleep -Milliseconds 800
                 } finally {
                     # 用完立即释放对宿主的对象引用（$app 在这里；其余对象在各函数的 finally 里已逐个 Release-Com）。
                     # 宿主在 Quit 之后要等外部 COM 引用全部释放才真正退出；旧版把引用一直持有到下次附着或 GC，
@@ -754,6 +787,16 @@ while ($true) {
                     Release-Com $app
                     $app = $null
                     [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+                    # 退避记账（v1.6.1）：失败的窗口按 Get-BackoffDelay 排下次可试的时刻；得出任何非失败的结论即清零。
+                    # 旧版这里是「固定等 800 毫秒再按周期重试」，会拖慢同一轮里别的窗口。
+                    if ($attachFailed) {
+                        $boPrevDelay = 0
+                        if ($null -ne $backoff[$key]) { $boPrevDelay = $backoff[$key].delay }
+                        $boNextDelay = Get-BackoffDelay $boPrevDelay $IntervalSeconds $backoffMaxSeconds
+                        $backoff[$key] = @{ until = (Get-Date).AddSeconds($boNextDelay); delay = $boNextDelay }
+                    } else {
+                        $backoff.Remove($key)
+                    }
                 }
             }
             # 清理已消失进程 / 窗口的宽限记录（隐藏实例宽限表按 pid、隐藏窗口状态表按窗口键，宿主或窗口没了就删）
@@ -765,6 +808,7 @@ while ($true) {
             }
             foreach ($k in @($hiddenSince.Keys)) { if (-not $livePids.ContainsKey($k)) { $hiddenSince.Remove($k) } }
             foreach ($k in @($hiddenWin.Keys)) { if (-not $liveKeys.ContainsKey($k)) { $hiddenWin.Remove($k) } }
+            foreach ($k in @($backoff.Keys)) { if (-not $liveKeys.ContainsKey($k)) { $backoff.Remove($k) } }
         }
     } catch {
         WdLog ("cycle " + $cycle + " 异常: " + $_.Exception.Message)

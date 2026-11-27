@@ -59,6 +59,8 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.6.1：预研基础第 1 步（不发版）——看门狗加固：附着失败按窗口退避（2、4、8、16 秒，封顶 30 秒）、
+'       宏名限定到工作簿、装载成功须「初始化成功、菜单在位、版本可读」三项齐备。本版 VBA 功能无变化，仅版本号
 ' 1.6.0：稳定运行优先版（不扩功能面）——① SHA-256 改 advapi32 CAPI 原生实现优先（条件编译声明：
 '       Excel 64 位走 PtrSafe+LongPtr，WPS 走 #Else 分支；分块流式读取；首次使用做标准向量自检，失败则
 '       本会话回退），修复 WPS 下使用变慢（纯 VBA 实测 0.21 MB/s：插入 5MB 约 23 秒、体检 50MB 约
@@ -94,7 +96,7 @@ Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ■ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.6.0"
+Public Const ATTACHLINK_VERSION As String = "1.6.1"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"
