@@ -30,16 +30,24 @@
 #   任何路径下都不得把占位控件留在缓存里。
 #
 # 用法：powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-deadmenu.ps1
+#       换 .NET 版被测看门狗：powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-deadmenu.ps1 -WatchdogExe dist\AttachLink.Watchdog.exe
 # 期望末行：RESULT: PASS
 # 前置：机器级常驻看门狗与被测脚本同版（哈希一致，否则 SKIP——版本不一致时它会对同一实例做自己的动作，
 #       结果无法归因）；看门狗日志在刷新；运行前没有 EXCEL.EXE。
 # 可选参数：-AssumeSameVersion  跳过同版检查（仅在常驻看门狗已暂停、单独验证工作区版本时使用）；
-#           -WaitSeconds <秒>  等看门狗处理的上限（默认 30）。
+#           -WaitSeconds <秒>  等看门狗处理的上限（默认 30）；
+#           -WatchdogExe <路径>  用该可执行文件当被测看门狗（相对路径按仓库根解析；给 dist\AttachLink.Watchdog.exe
+#           即换 .NET 版，日志措辞与 PowerShell 版逐项等价，仅少「Add-Type 完成」一行）。不给就是原来的 PowerShell 版。
 # 注意：含中文，必须 UTF-8 with BOM。本脚本只按自己记录的进程号结束自己拉起的实例，不会结束其它 Excel。
 # =====================================================================
-param([switch]$AssumeSameVersion, [int]$WaitSeconds = 30)
+param([switch]$AssumeSameVersion, [int]$WaitSeconds = 30, [string]$WatchdogExe = '')
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+# -WatchdogExe：相对路径按仓库根（scripts 的上一级）解析；文件不存在直接失败，不让测试带着空开关跑。
+if ($WatchdogExe) {
+    if (-not [IO.Path]::IsPathRooted($WatchdogExe)) { $WatchdogExe = Join-Path (Split-Path -Parent $PSScriptRoot) $WatchdogExe }
+    if (-not (Test-Path $WatchdogExe)) { throw "未找到被测看门狗可执行文件：$WatchdogExe" }
+}
 
 $wdPath = Join-Path $PSScriptRoot 'watchdog.ps1'
 if (-not (Test-Path $wdPath)) { throw "未找到 $wdPath" }
@@ -278,7 +286,13 @@ if ($runningExcel.Count -gt 0) {
 $testWd = $null
 $testWdLog = Join-Path $env:TEMP ('AttachLinkTestDeadMenu_wd_' + [guid]::NewGuid().ToString('N') + '.log')
 try {
-    $testWd = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $testWdLog), '-XlamPath', ('"{0}"' -f $trustedXlam), '-AttachHiddenInstances') -PassThru -WindowStyle Hidden
+    # 给了 -WatchdogExe 就启动 .NET 版被测看门狗（参数名与 PowerShell 版相同）；否则启动原 PowerShell 版。
+    # 日志路径、xlam 路径、-AttachHiddenInstances 与原写法逐字保持一致。
+    if ($WatchdogExe) {
+        $testWd = Start-Process -FilePath $WatchdogExe -ArgumentList @('-LogFile', ('"{0}"' -f $testWdLog), '-XlamPath', ('"{0}"' -f $trustedXlam), '-AttachHiddenInstances') -PassThru -WindowStyle Hidden
+    } else {
+        $testWd = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $testWdLog), '-XlamPath', ('"{0}"' -f $trustedXlam), '-AttachHiddenInstances') -PassThru -WindowStyle Hidden
+    }
 } catch {
     Check $false ('被测看门狗启动失败: ' + $_.Exception.Message)
 }

@@ -12,6 +12,9 @@
 # 活性判定唯一依据 = 看门狗日志心跳（LastWriteTime 距今 ≤ 90 秒）。计划任务直接运行无窗口启动器
 #   （AttachLink.WatchdogLauncher.exe），看门狗运行期间任务 State=Running；medium-IL 也枚举不到高完整性的
 #   看门狗进程——两者都不作为依据。
+# 看门狗引擎（v1.7.0 起，信息性）：默认 .NET 版 AttachLink.Watchdog.exe（依赖 .NET Framework 4.8，Win10 1903+ /
+#   Win11 自带）；部署目录里没有它时启动器回退 Windows PowerShell 5.1 + watchdog.ps1。两种引擎写同一日志、
+#   同一套措辞，machine.files 只在成功文案里报告当前是哪种，不是必需文件、不影响任何判定。
 # 输出协议（每行一条，制表符分隔；消息内的制表符 / 换行已替换为空格）：
 #   HC<TAB>id<TAB>status<TAB>message      status ∈ ok / warn / fail / skip / info
 #   HCHINT<TAB>id<TAB>hint                可操作的处置建议（可选，跟随对应 HC 行）
@@ -556,7 +559,15 @@ if ($MyInvocation.InvocationName -ne '.') {
                         $legacyNote = '；发现旧启动器 watchdog_launcher.vbs，重新「一键安装」会清掉'
                     }
                 } catch {}
-                Write-Hc 'machine.files' 'ok' ("机器级文件齐全（$($needFiles -join '、')）" + $legacyNote)
+                # 看门狗引擎形态（信息性，不影响判定）：部署目录里有 AttachLink.Watchdog.exe = .NET 版（启动器优先用它）；
+                # 没有它时启动器回退 PowerShell 5.1 + watchdog.ps1——它不是必需文件，缺失不算失败
+                $engineNote = '；看门狗引擎=PowerShell（watchdog.ps1）'
+                try {
+                    if (Test-Path -LiteralPath (Join-Path $MachineDir 'AttachLink.Watchdog.exe')) {
+                        $engineNote = '；看门狗引擎=.NET（AttachLink.Watchdog.exe）'
+                    }
+                } catch {}
+                Write-Hc 'machine.files' 'ok' ("机器级文件齐全（$($needFiles -join '、')）" + $legacyNote + $engineNote)
             } else {
                 Write-Hc 'machine.files' 'fail' ("机器级文件缺失：" + ($missingFiles -join '、')) '重新「一键安装」补全机器级部署'
             }

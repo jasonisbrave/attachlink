@@ -89,14 +89,14 @@ with tempfile.TemporaryDirectory() as d:
         with contextlib.redirect_stdout(io.StringIO()):
             check(sa.selfcheck() == 3, "selfcheck：载荷齐全但缺 VERSION.txt 之外的文件时返回 3（临时目录无载荷）")
             for n in ["dist\\AttachLink.xlam", "scripts\\setup.ps1", "scripts\\watchdog.ps1", "dist\\AttachLink.WatchdogLauncher.exe",
-                      "build\\install.ps1", "build\\install-elevated.ps1", "run-elevated.ps1", "elevated-capture.ps1"]:
+                      "dist\\AttachLink.Watchdog.exe", "build\\install.ps1", "build\\install-elevated.ps1", "run-elevated.ps1", "elevated-capture.ps1"]:
                 os.makedirs(os.path.dirname(os.path.join(d, "payload", n)), exist_ok=True)
                 open(os.path.join(d, "payload", n), "w").close()
             with contextlib.redirect_stdout(io.StringIO()):
-                check(sa.selfcheck() == 3, "selfcheck：缺第 10 个文件 scripts\\healthcheck.ps1 → 3")
+                check(sa.selfcheck() == 3, "selfcheck：缺第 11 个文件 scripts\\healthcheck.ps1 → 3")
             open(os.path.join(d, "payload", "scripts", "healthcheck.ps1"), "w").close()
             with contextlib.redirect_stdout(io.StringIO()):
-                check(sa.selfcheck() == 0, "selfcheck：10 个载荷齐全且版本可读 → 0")
+                check(sa.selfcheck() == 0, "selfcheck：11 个载荷齐全且版本可读 → 0")
             os.remove(os.path.join(d, "payload", "dist", "AttachLink.WatchdogLauncher.exe"))
             buf_miss = io.StringIO()
             with contextlib.redirect_stdout(buf_miss):
@@ -104,6 +104,13 @@ with tempfile.TemporaryDirectory() as d:
             check("缺失" in buf_miss.getvalue() and "dist\\AttachLink.WatchdogLauncher.exe" in buf_miss.getvalue(),
                   "selfcheck：缺启动器 exe 时缺失清单报出该文件名")
             open(os.path.join(d, "payload", "dist", "AttachLink.WatchdogLauncher.exe"), "w").close()
+            os.remove(os.path.join(d, "payload", "dist", "AttachLink.Watchdog.exe"))
+            buf_miss_wd = io.StringIO()
+            with contextlib.redirect_stdout(buf_miss_wd):
+                check(sa.selfcheck() == 3, "selfcheck：缺 dist\\AttachLink.Watchdog.exe → 3")
+            check("缺失" in buf_miss_wd.getvalue() and "dist\\AttachLink.Watchdog.exe" in buf_miss_wd.getvalue(),
+                  "selfcheck：缺 .NET 看门狗 exe 时缺失清单报出该文件名")
+            open(os.path.join(d, "payload", "dist", "AttachLink.Watchdog.exe"), "w").close()
             open(os.path.join(d, "payload", "VERSION.txt"), "w").close()   # 版本文件变空
             with contextlib.redirect_stdout(io.StringIO()):
                 check(sa.selfcheck() == 3, "selfcheck：VERSION.txt 为空 → 3（不再静默显示未知版本）")

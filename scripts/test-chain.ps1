@@ -12,6 +12,7 @@
 # v1.6.2 起常驻看门狗不再附着隐藏实例：被测看门狗带 -AttachHiddenInstances（回归开关）。[1] 的实例是可见的，
 # 同版的常驻看门狗与被测看门狗都可能先完成装载（[4] 的两种来源都保留）；[7] 的实例是隐藏的，只能由被测看门狗附着。
 # 用法：powershell -ExecutionPolicy Bypass -File test-chain.ps1
+#       换 .NET 版被测看门狗：powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-chain.ps1 -WatchdogExe dist\AttachLink.Watchdog.exe
 # 期望输出末行：RESULT: PASS
 # 注意：本文件含中文，必须保存为 UTF-8 with BOM（PS5.1 按 ANSI 误读无
 # BOM 文件会破坏解析，教训见 WORKLOG 根因 #11）。
@@ -26,8 +27,15 @@
 # =====================================================================
 # 可选参数：-AssumeSameVersion  跳过「常驻看门狗与被测脚本同版」的检查。仅在本机常驻看门狗已暂停、要单独验证
 #           工作区版本时使用；常驻看门狗在运行时不要加——它会对同一实例做自己的动作，结果无法归因。
-param([switch]$AssumeSameVersion)
+#           -WatchdogExe <路径>  用该可执行文件当被测看门狗（相对路径按仓库根解析；给 dist\AttachLink.Watchdog.exe
+#           即换 .NET 版，日志措辞与 PowerShell 版逐项等价，仅少「Add-Type 完成」一行）。不给就是原来的 PowerShell 版。
+param([switch]$AssumeSameVersion, [string]$WatchdogExe = '')
 $ErrorActionPreference = 'Stop'
+# -WatchdogExe：相对路径按仓库根（scripts 的上一级）解析；文件不存在直接失败，不让测试带着空开关跑。
+if ($WatchdogExe) {
+    if (-not [IO.Path]::IsPathRooted($WatchdogExe)) { $WatchdogExe = Join-Path (Split-Path -Parent $PSScriptRoot) $WatchdogExe }
+    if (-not (Test-Path $WatchdogExe)) { throw "未找到被测看门狗可执行文件：$WatchdogExe" }
+}
 
 $wdPath = Join-Path $PSScriptRoot 'watchdog.ps1'
 if (-not (Test-Path $wdPath)) { throw "未找到 $wdPath" }
@@ -157,6 +165,14 @@ function Close-TestInstance($app, $books, [uint32]$ProcId) {
         if (-not (Wait-Exit $ProcId 10)) { try { Stop-Process -Id $ProcId -Force } catch {}; "    已清理残留测试实例 pid=$ProcId" }
     }
 }
+function Start-TestWatchdog([string]$Log, [string]$Xlam, [switch]$AttachHidden) {
+    # 被测看门狗启动分支：给了 -WatchdogExe 就启动它（.NET 版，参数名与 PowerShell 版相同）；否则启动原 PowerShell 版。
+    # 日志路径、xlam 路径、是否带 -AttachHiddenInstances 由调用方逐处传入，与原写法逐字保持一致。
+    $wdArgs = @('-LogFile', ('"{0}"' -f $Log), '-XlamPath', ('"{0}"' -f $Xlam))
+    if ($AttachHidden) { $wdArgs += '-AttachHiddenInstances' }
+    if ($WatchdogExe) { return (Start-Process -FilePath $WatchdogExe -ArgumentList $wdArgs -PassThru -WindowStyle Hidden) }
+    return (Start-Process powershell -ArgumentList (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath)) + $wdArgs) -PassThru -WindowStyle Hidden)
+}
 
 # 本机有机器级部署时用 Program Files 副本，否则用用户级库目录副本（与常驻看门狗用同一份，见 [3] 的说明）
 $trustedXlam = 'C:\Program Files\AttachLink\AttachLink.xlam'
@@ -253,7 +269,7 @@ try {
     # 被测看门狗与机器级常驻看门狗必须用同一份 xlam：二者会在 1 秒内先后附着同一实例，若各带一份不同的同名副本，
     # 后到者会再打开第二份、撞出「两份同名副本」的局面（实例随后退不干净）。
     $log1 = Join-Path $env:TEMP ('AttachLinkTestChain_wd_' + [guid]::NewGuid().ToString('N') + '.log')
-    $wd = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $log1), '-XlamPath', ('"{0}"' -f $trustedXlam), '-AttachHiddenInstances') -PassThru -WindowStyle Hidden
+    $wd = Start-TestWatchdog -Log $log1 -Xlam $trustedXlam -AttachHidden
 
     '[4] 轮询验证菜单与装载状态（最多 25 秒）'
     $deadline = (Get-Date).AddSeconds(25)
@@ -388,7 +404,7 @@ try {
         '    SKIP 预热生命周期检查：机器级常驻看门狗与被测脚本版本不一致（它的行为会混进结果），请先重新部署'
     } else {
         $log2 = Join-Path $env:TEMP ('AttachLinkTestChain_wd_' + [guid]::NewGuid().ToString('N') + '.log')
-        $wd2 = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $log2), '-XlamPath', ('"{0}"' -f $trustedXlam), '-AttachHiddenInstances') -PassThru -WindowStyle Hidden
+        $wd2 = Start-TestWatchdog -Log $log2 -Xlam $trustedXlam -AttachHidden
         '    被测看门狗空转 50 秒…'
         Start-Sleep -Seconds 50
         $xl2 = New-Object -ComObject Excel.Application        # 隐藏实例

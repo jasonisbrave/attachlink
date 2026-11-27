@@ -73,6 +73,21 @@ namespace AttachLink.Watchdog
             }
         }
 
+        /// <summary>常驻（计划任务经启动器启动时的模式）：无限循环，直到被结束（停止任务 / 注销 / 启动器被结束）。
+        /// 启动行与 PowerShell 版相同（「看门狗启动, pid=…, xlam=…」）。-MaxCycles 仅供回归。</summary>
+        public int RunResident()
+        {
+            _log.Log("看门狗启动, pid=" + Process.GetCurrentProcess().Id + ", xlam=" + _opt.XlamPath);
+            while (true)
+            {
+                _cycle++;
+                RunCycle();
+                if (_opt.MaxCycles > 0 && _cycle >= _opt.MaxCycles) break;
+                System.Threading.Thread.Sleep(TimeSpan.FromSeconds(_opt.IntervalSeconds));
+            }
+            return 0;
+        }
+
         /// <summary>跑若干周期后退出（--diag 只读诊断、--once 手动装载）。启动行标明模式。</summary>
         public int Run(string modeLabel)
         {

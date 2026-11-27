@@ -17,7 +17,9 @@ if ($basText -notmatch 'ATTACHLINK_VERSION\s+As\s+String\s*=\s*"([^"]+)"') { thr
 $ver = $Matches[1]
 Write-Host "版本：v$ver"
 
-# 组装 payload（与 exe 内嵌布局一致）
+# 组装 payload（与 exe 内嵌布局一致）。清单：VERSION.txt + dist\AttachLink.xlam + dist\AttachLink.WatchdogLauncher.exe
+# + dist\AttachLink.Watchdog.exe（v1.7.0 起 .NET 看门狗）+ scripts\{setup,watchdog,healthcheck}.ps1
+# + build\{install,install-elevated}.ps1 + run-elevated.ps1 + elevated-capture.ps1
 $stage = Join-Path $env:TEMP "AttachLink_exe_payload"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path "$stage\dist", "$stage\scripts", "$stage\build" | Out-Null
@@ -27,6 +29,9 @@ Copy-Item $distXlam "$stage\dist\AttachLink.xlam" -Force
 $distLauncher = Join-Path $root 'dist\AttachLink.WatchdogLauncher.exe'
 if (-not (Test-Path $distLauncher)) { throw "未找到 $distLauncher，请先运行 build.ps1" }
 Copy-Item $distLauncher "$stage\dist\AttachLink.WatchdogLauncher.exe" -Force
+$distNetWd = Join-Path $root 'dist\AttachLink.Watchdog.exe'
+if (-not (Test-Path $distNetWd)) { throw "未找到 $distNetWd，请先运行 build.ps1" }
+Copy-Item $distNetWd "$stage\dist\AttachLink.Watchdog.exe" -Force
 Copy-Item (Join-Path $root 'scripts\setup.ps1')            "$stage\scripts\" -Force
 Copy-Item (Join-Path $root 'scripts\watchdog.ps1')         "$stage\scripts\" -Force
 Copy-Item (Join-Path $root 'scripts\healthcheck.ps1')       "$stage\scripts\" -Force
@@ -52,6 +57,7 @@ $addData = @(
     , @("$stage\scripts\setup.ps1", "payload\scripts")
     , @("$stage\scripts\watchdog.ps1", "payload\scripts")
     , @("$stage\dist\AttachLink.WatchdogLauncher.exe", "payload\dist")
+    , @("$stage\dist\AttachLink.Watchdog.exe", "payload\dist")
     , @("$stage\scripts\healthcheck.ps1", "payload\scripts")
     , @("$stage\build\install.ps1", "payload\build")
     , @("$stage\build\install-elevated.ps1", "payload\build")

@@ -33,7 +33,7 @@ try {
     $r = $wps.Run('AttachLink_SelfTest')
     Check ($r -eq $true) 'SelfTest（晚绑定改造后可编译）'
     $v = $wps.Run('AttachLink_GetVersion')
-    Check ("$v" -eq '1.6.4') "GetVersion=1.6.4（实际 $v）"
+    Check ("$v" -eq '1.7.0') "GetVersion=1.7.0（实际 $v）"
 } catch { Check $false "打开/SelfTest 失败: $($_.Exception.Message.Split("`n")[0])" }
 
 '--- 2) 清单/体检（含标记回退） ---'

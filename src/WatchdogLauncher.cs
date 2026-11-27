@@ -1,8 +1,9 @@
 ﻿// =====================================================================
 // AttachLink 看门狗启动器（AttachLink.WatchdogLauncher.exe）
 // ---------------------------------------------------------------------
-// 计划任务的直接动作：无窗口地启动常驻看门狗（Windows PowerShell 5.1 + watchdog.ps1），
-// 看着它运行，异常退出时把它拉起来；自己结束时把看门狗的退出码返回给计划任务。
+// 计划任务的直接动作：无窗口地启动常驻看门狗，看着它运行，异常退出时把它拉起来；自己结束时把看门狗的退出码返回给计划任务。
+// 看门狗有两种引擎，本程序旁边有 AttachLink.Watchdog.exe 就用它（v1.7.0 起的默认，预编译的 .NET 程序），
+// 否则退回 Windows PowerShell 5.1 + watchdog.ps1（部署时带 -LegacyPowerShell）。两种引擎的监管方式相同：
 //   - 无控制台窗口：CreateNoWindow（不是 -WindowStyle Hidden 那种事后隐藏）。Windows 11 的
 //     默认终端是 Windows Terminal 时，直接拿 powershell.exe 当任务动作会被交给终端窗口托管、
 //     留在桌面上（2026-11-27 实测）；本程序是 GUI 子系统程序，自己也没有窗口。
@@ -15,10 +16,10 @@
 //     本进程一死（被结束、被停止任务），看门狗随之结束。
 //   - 记录：启动器的动作写进看门狗的日志（默认 %TEMP%\AttachLinkWatchdog.log，与看门狗同一格式）。
 // 可选参数（只供回归使用；计划任务不带任何参数）：
-//   -LogFile <路径>  -MaxFailures <n>  -RestartDelaySeconds <s>  -StableSeconds <s>
+//   -LogFile <路径>  -ChildLog <路径>  -MaxFailures <n>  -RestartDelaySeconds <s>  -StableSeconds <s>
 // 由 build\make-launcher.ps1 用系统自带的 csc.exe 编译（.NET Framework 4.x）；只用 C# 5 语法。
-// 退出码：看门狗的退出码（放弃时为最后一次的退出码）；2 = watchdog.ps1 不在本程序旁边；
-//         3 = 找不到 Windows PowerShell；4 = 启动看门狗失败；5 = 参数不认识。
+// 退出码：看门狗的退出码（放弃时为最后一次的退出码）；2 = 两种引擎的看门狗都不在本程序旁边；
+//         3 = 找不到 Windows PowerShell（只在回退到 PowerShell 版时才会检查）；4 = 启动看门狗失败；5 = 参数不认识。
 // =====================================================================
 using System;
 using System.Collections.Generic;
@@ -89,6 +90,7 @@ namespace AttachLink
         private static int restartDelaySeconds = 10;
         private static int stableSeconds = 60;
         private static string logFile = Path.Combine(Path.GetTempPath(), "AttachLinkWatchdog.log");
+        private static string childLogFile = "";       // 仅回归：把看门狗自己的日志改到指定文件（-ChildLog）
 
         // 日志行格式与 watchdog.ps1 的 WdLog 一致（UTF-8，无 BOM，CRLF）
         private static void Log(string message)
@@ -113,6 +115,7 @@ namespace AttachLink
             {
                 string a = args[i].ToLowerInvariant();
                 if (a == "-logfile" && i + 1 < args.Length) { logFile = args[++i]; }
+                else if (a == "-childlog" && i + 1 < args.Length) { childLogFile = args[++i]; }
                 else if (a == "-maxfailures" && i + 1 < args.Length)
                 {
                     int v; if (!TryParseInt(args[++i], out v) || v < 1) { return ExitBadArgument; } maxFailures = v;
@@ -129,12 +132,18 @@ namespace AttachLink
             }
 
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string script = Path.Combine(baseDir, "watchdog.ps1");
+            string netWatchdog = Path.Combine(baseDir, "AttachLink.Watchdog.exe");   // v1.7.0：预编译的 .NET 看门狗，在它就优先
+            string script = Path.Combine(baseDir, "watchdog.ps1");                   // 回退：PowerShell 版（部署时带 -LegacyPowerShell）
             string xlam = Path.Combine(baseDir, "AttachLink.xlam");
             string ps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
                 @"WindowsPowerShell\v1.0\powershell.exe");
-            if (!File.Exists(script)) { Log("启动器: 找不到 watchdog.ps1，启动器退出（退出码=2）"); return ExitDeployIncomplete; }
-            if (!File.Exists(ps)) { Log("启动器: 找不到 Windows PowerShell，启动器退出（退出码=3）"); return ExitNoPowerShell; }
+            bool useNet = File.Exists(netWatchdog);
+            if (!useNet)
+            {
+                if (!File.Exists(script)) { Log("启动器: 找不到 watchdog.ps1，启动器退出（退出码=2）"); return ExitDeployIncomplete; }
+                if (!File.Exists(ps)) { Log("启动器: 找不到 Windows PowerShell，启动器退出（退出码=3）"); return ExitNoPowerShell; }
+            }
+            Log("启动器: 启动看门狗（引擎=" + (useNet ? ".NET：AttachLink.Watchdog.exe" : "PowerShell：watchdog.ps1") + "）");
 
             // 作业对象：句柄关闭（本进程结束）时结束作业内的一切进程。
             // 设不上就不挂——看门狗照常启动，只是失去「本进程一死它也结束」的保障。
@@ -151,10 +160,20 @@ namespace AttachLink
                 }
             }
 
-            // 与旧 VBS 启动器传给 powershell.exe 的参数一致（窗口风格那一项在无窗口控制台下不起作用，留作双保险）
-            ProcessStartInfo psi = new ProcessStartInfo(ps,
-                "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + script +
-                "\" -XlamPath \"" + xlam + "\"");
+            // 两种引擎收到的 -XlamPath 相同；-ChildLog（仅回归）把它们各自的日志改到指定文件。
+            // PowerShell 那一路的参数与旧 VBS 启动器传给 powershell.exe 的一致（窗口风格那一项在无窗口控制台下不起作用，留作双保险）
+            string childLog = childLogFile.Length > 0 ? " -LogFile \"" + childLogFile + "\"" : "";
+            ProcessStartInfo psi;
+            if (useNet)
+            {
+                psi = new ProcessStartInfo(netWatchdog, "-XlamPath \"" + xlam + "\"" + childLog);
+            }
+            else
+            {
+                psi = new ProcessStartInfo(ps,
+                    "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + script +
+                    "\" -XlamPath \"" + xlam + "\"" + childLog);
+            }
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
             psi.WorkingDirectory = baseDir;

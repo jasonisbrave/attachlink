@@ -59,6 +59,9 @@ Public Const HOTKEY_INDEX As String = "^+k"     ' Ctrl+Shift+K
 Public Const INDEX_SHEET_NAME As String = "附件清单"
 
 ' 版本号（单一事实源：安装器/看门狗日志/支持排障都以此为准；语义化递增）
+' 1.7.0：预研基础第 5 步（不发版）——常驻看门狗换成预编译的 .NET 程序 AttachLink.Watchdog.exe（判定规则、装载流程、
+'       日志措辞与 PowerShell 版逐项等价；计划任务的直接动作仍是启动器，由它拉起 .NET 看门狗；部署时可带
+'       -LegacyPowerShell 退回 PowerShell 版）。本版 VBA 功能无变化，仅版本号
 ' 1.6.4：预研基础第 4 步（不发版）——改加载项的初始化方式：去掉 Workbook_Open（应用事件的绑定挪进
 '       AttachLink_Initialize），去掉「打开工作簿」的事件处理；外部装载完全靠看门狗显式初始化，交互式
 '       启动靠 Auto_Open。归一化失败的「打开时再提醒」改为在该工作簿里右键时提醒。
@@ -105,7 +108,7 @@ Public Const INDEX_SHEET_NAME As String = "附件清单"
 ' 1.2.1：风险处置（Issue #1）——看门狗父进程白名单（配置化默认开放）+ 装载版本日志
 ' 1.2.0：文件夹引用（复制入附件夹+夹内基线）/ 重命名链接显示名 / 插入对话框记忆上次源目录 / 右键菜单二级化
 ' ■ 发布流程约定：版本发布（GitHub Release + git push）必须先经用户确认
-Public Const ATTACHLINK_VERSION As String = "1.6.4"
+Public Const ATTACHLINK_VERSION As String = "1.7.0"
 '=====================================================================
 
 Private Const MENU_TAG As String = "AttachLinkCtx"

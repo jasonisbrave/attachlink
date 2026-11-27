@@ -9,13 +9,18 @@
 # AccessibleObjectFromWindow 取得 Application，强制装载 AttachLink.xlam。
 #
 # 本脚本做四件事：
-#   1. 部署文件到 C:\Program Files\AttachLink\（xlam + 看门狗脚本 + 无窗口启动器 AttachLink.WatchdogLauncher.exe；
+#   1. 部署文件到 C:\Program Files\AttachLink\（xlam + 看门狗脚本 + 无窗口启动器 AttachLink.WatchdogLauncher.exe +
+#      .NET 看门狗 AttachLink.Watchdog.exe（v1.7.0 起默认，预编译产物，依赖 .NET Framework 4.8，Win10 1903+ / Win11 自带）；
 #      v1.6.3 起不再部署 VBS 启动器，旧版留下的 watchdog_launcher.vbs 顺手删除）
 #   2. HKLM 受信任位置指向该目录（管理员控制目录，规避提权宏劫持面；
 #      高完整性 Excel 不受 HKCU per-user 信任位置保障，必须走 HKLM）
 #   3. 注册登录计划任务（当前用户，RunLevel=Highest）：看门狗以最高权限
 #      常驻，可同时附着普通 Excel 与管理员权限的鼎信诺 Excel
 #   4. 立即启动看门狗（无需注销重登），并清理旧 COM 引导器注册残留
+#
+# -LegacyPowerShell：部署 PowerShell 版看门狗（不部署 AttachLink.Watchdog.exe，并把机器级目录里已有的删掉）——
+#   启动器的规则：旁边有 AttachLink.Watchdog.exe 就用它（默认），否则回退 Windows PowerShell 5.1 + watchdog.ps1。
+#   watchdog.ps1 两种形态都照旧部署，留给回退；计划任务的直接动作不变，仍是 AttachLink.WatchdogLauncher.exe。
 #
 # 运行方式（管理员 PowerShell）：
 #   powershell -ExecutionPolicy Bypass -File install-elevated.ps1
@@ -35,6 +40,8 @@ param(
     # 部署后也可直接编辑 C:\Program Files\AttachLink\watchdog.conf（ParentAllowlist= 行）。
     [string]$WatchdogParentFilter = '',
     [switch]$ClearWatchdogParentFilter,
+    # 带上它部署 PowerShell 版看门狗（不部署 AttachLink.Watchdog.exe 并删除机器级已有的，启动器回退 PowerShell 5.1 + watchdog.ps1）；默认部署 .NET 版
+    [switch]$LegacyPowerShell,
     # 交互登录用户的 SID（调用方一般不传）：未传时自动探测与本进程同 Session 的 explorer.exe
     # 的所有者 SID。提权账户 ≠ 交互登录用户时安装分支如实失败（exit 12），不假装「已部署」。
     [string]$InteractiveUserSid = ''
@@ -50,8 +57,9 @@ $officeVersions = @('16.0', '15.0', '14.0')
 
 function Get-WatchdogProcessObjects {
     # 按命令行精确匹配看门狗进程（避免误伤其他 powershell/wscript）：看门狗的 PowerShell、启动器 exe、
+    # .NET 看门狗 exe（命令行形如 AttachLink.Watchdog.exe -XlamPath …，-like '*AttachLink*watchdog*' 对它成立）、
     # 以及旧版部署可能留下的 wscript 启动器
-    return @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='wscript.exe' OR Name='AttachLink.WatchdogLauncher.exe'" -ErrorAction SilentlyContinue |
+    return @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='wscript.exe' OR Name='AttachLink.WatchdogLauncher.exe' OR Name='AttachLink.Watchdog.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -like '*AttachLink*watchdog*' })
 }
 
@@ -171,9 +179,11 @@ if ($MyInvocation.InvocationName -ne '.') {
         $distXlam = Join-Path $root 'dist\AttachLink.xlam'
         $srcWd    = Join-Path $root 'scripts\watchdog.ps1'
         $srcLauncher = Join-Path $root 'dist\AttachLink.WatchdogLauncher.exe'
+        $srcNetWd = Join-Path $root 'dist\AttachLink.Watchdog.exe'   # v1.7.0 起的 .NET 看门狗预编译产物（-LegacyPowerShell 时不部署）
         foreach ($f in @($distXlam, $srcWd, $srcLauncher)) {
             if (-not (Test-Path $f)) { throw "未找到 $f 。" }
         }
+        if (-not $LegacyPowerShell -and -not (Test-Path $srcNetWd)) { throw "未找到 $srcNetWd ，先运行 build\build.ps1。" }
 
         # ---- 1) 停旧看门狗、清理旧 COM 引导器、部署文件 ----
         # 先禁用旧任务再结束进程：部署的这几秒里不让时间触发器把旧的启动器再拉起来（exe 被占用，复制会失败）。
@@ -186,6 +196,13 @@ if ($MyInvocation.InvocationName -ne '.') {
         Copy-Item $distXlam (Join-Path $machineDir 'AttachLink.xlam') -Force
         Copy-Item $srcWd    (Join-Path $machineDir 'watchdog.ps1') -Force
         Copy-Item $srcLauncher (Join-Path $machineDir 'AttachLink.WatchdogLauncher.exe') -Force
+        # .NET 看门狗：默认部署（启动器优先用它）；-LegacyPowerShell 时改为删除机器级已有的，让启动器回退 PowerShell 版。
+        # watchdog.ps1 两种形态都照旧部署，留给回退
+        if ($LegacyPowerShell) {
+            Remove-Item (Join-Path $machineDir 'AttachLink.Watchdog.exe') -Force -ErrorAction SilentlyContinue
+        } else {
+            Copy-Item $srcNetWd (Join-Path $machineDir 'AttachLink.Watchdog.exe') -Force
+        }
         # 旧版部署留下的 VBS 启动器：计划任务已不再使用它，删掉（v1.6.3 起）
         Remove-Item (Join-Path $machineDir 'watchdog_launcher.vbs') -Force -ErrorAction SilentlyContinue
         Get-ChildItem $machineDir -File | ForEach-Object { Unblock-File $_.FullName -ErrorAction SilentlyContinue }
@@ -251,6 +268,14 @@ if ($MyInvocation.InvocationName -ne '.') {
         $hLDist = Get-Sha256 $srcLauncher
         $hLDest = Get-Sha256 (Join-Path $machineDir 'AttachLink.WatchdogLauncher.exe')
         $launcherNote = if ($hLDist -eq $hLDest) { "与 dist 一致（SHA-256 前16位 $($hLDist.Substring(0,16))）" } else { "警告：与 dist 不一致！" }
+        # 看门狗引擎形态；.NET 版时像 xlam / 启动器那样核对部署副本与 dist 的哈希（-LegacyPowerShell 无部署副本可比）
+        $wdEngine = if ($LegacyPowerShell) { 'PowerShell（watchdog.ps1，-LegacyPowerShell）' } else { '.NET（AttachLink.Watchdog.exe）' }
+        $wdNetNote = ''
+        if (-not $LegacyPowerShell) {
+            $hWDist = Get-Sha256 $srcNetWd
+            $hWDest = Get-Sha256 (Join-Path $machineDir 'AttachLink.Watchdog.exe')
+            $wdNetNote = if ($hWDist -eq $hWDest) { "与 dist 一致（SHA-256 前16位 $($hWDist.Substring(0,16))）" } else { '警告：与 dist 不一致！' }
+        }
 
         Write-Host '机器级看门狗部署完成。'
         Write-Host ("  部署目录 : $machineDir")
@@ -259,6 +284,8 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ("$state" -eq 'Running') { Write-Host '             看门狗运行期间任务状态应为 Running（启动器是任务的直接动作）' } else { Write-Host '             注意：任务当前不是 Running，看门狗可能没有在运行，请运行健康检查' }
         Write-Host ("  xlam 版本核对 : $verNote")
         Write-Host ("  启动器核对 : $launcherNote")
+        Write-Host ("  看门狗引擎 : $wdEngine")
+        if ($wdNetNote) { Write-Host ("  .NET 看门狗核对 : $wdNetNote") }
         Write-Host '验证：%TEMP%\AttachLinkWatchdog.log 应出现「看门狗启动」且无异常。'
         Write-Host '完全退出并重新打开鼎信诺后生效：打开底稿约 2~4 秒内右键菜单出现。'
     }

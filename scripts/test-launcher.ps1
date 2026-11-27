@@ -11,16 +11,17 @@
 #   E. 正常结束：看门狗以 0 退出 → 启动器不重启、返回 0
 #   F. 不留孤儿：结束启动器后看门狗随之结束（作业对象）
 #   G. 参数与部署自检：不认识的参数 → 5；旁边没有 watchdog.ps1 → 2
-# 可选：-WithTaskIntegration 追加真机段（约 6 分钟；会注册一个当前用户的临时计划任务，结束后注销）：
-#   H. 计划任务（按触发启动、带 1 分钟重复）以启动器为动作：无窗口、状态 Running；看门狗崩溃后
+#   H. 启动器拉起 .NET 看门狗（v1.7.0 起的默认）：引擎选择、命令行、启动行格式、没 xlam 时暂停、崩溃重启、作业对象
+# 可选：-WithTaskIntegration 追加 I 段（约 6 分钟；会注册一个当前用户的临时计划任务，结束后注销）：
+#   I. 计划任务（按触发启动、带 1 分钟重复）以启动器为动作：无窗口、状态 Running；看门狗崩溃后
 #      启动器 8 秒内拉起、任务保持 Running；连续三次后启动器放弃、任务以非 0 结束；下一次重复把任务
 #      拉回来；结束启动器 → 看门狗随之结束、下一次重复再拉回来；Stop-ScheduledTask 后两者都不在。
 # 用法：powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-launcher.ps1 [-WithTaskIntegration]
-#       期望末行 RESULT: PASS（需要 dist\AttachLink.WatchdogLauncher.exe，先运行 build\build.ps1）
+#       期望末行 RESULT: PASS（需要 dist\AttachLink.WatchdogLauncher.exe 与 dist\AttachLink.Watchdog.exe，先运行 build\build.ps1）
 #       退出码：通过 0，有失败 1
 # 红线：只结束本测试自己启动的进程（心跳脚本记下的进程号与它们的父进程号），只注册 / 注销自己的临时任务；
 #       不碰 wps.exe、et.exe、sjp7.exe 与机器上常驻的那个启动器（它由计划任务管理）；
-#       启动器一律带 -LogFile 指向临时目录，不写进真实的看门狗日志。
+#       启动器一律带 -LogFile 指向临时目录，不写进真实的看门狗日志；拉起 .NET 看门狗的那一段另带 -ChildLog。
 # 编码：含中文，必须保存为 UTF-8 with BOM（WORKLOG 根因 #11）。
 # =====================================================================
 param([switch]$WithTaskIntegration)
@@ -57,10 +58,10 @@ $script:own = New-Object 'System.Collections.Generic.HashSet[int]'
 function Remember-Own([int[]]$Pids) { foreach ($p in $Pids) { if ($p -gt 0) { [void]$script:own.Add($p) } } }
 
 # 布置一个「部署目录」：启动器 + 心跳脚本（顶替 watchdog.ps1）+ 空的 AttachLink.xlam
-function New-Stage([string]$Dir, [switch]$WithoutScript) {
+function New-Stage([string]$Dir, [switch]$WithoutScript, [switch]$WithoutXlam) {
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     Copy-Item -LiteralPath $exe -Destination (Join-Path $Dir 'AttachLink.WatchdogLauncher.exe') -Force
-    [IO.File]::WriteAllText((Join-Path $Dir 'AttachLink.xlam'), '')
+    if (-not $WithoutXlam) { [IO.File]::WriteAllText((Join-Path $Dir 'AttachLink.xlam'), '') }
     if (-not $WithoutScript) {
         $fake = @'
 param([string]$XlamPath = '')
@@ -159,6 +160,9 @@ if ($null -eq $hb1) {
     $wins = Watch-Windows @($L1.Id, [int]$hb1.pid) 3
     Check ($wins.Count -eq 0) ('启动器与看门狗名下没有可见窗口，也没有控制台 / 终端窗口类的新窗口（3 秒，约 20 毫秒一采）' + $(if ($wins.Count -gt 0) { '；看到：' + ($wins -join ' ; ') } else { '' }))
     Check ((Get-NewTerminals $termBefore).Count -eq 0) '没有拉起 Windows Terminal'
+    $llB = Join-Path $stage1 'launcher.log'
+    $llBText = ''; if (Test-Path -LiteralPath $llB) { $llBText = [IO.File]::ReadAllText($llB, [Text.Encoding]::UTF8) }
+    Check ($llBText.Contains('启动器: 启动看门狗（引擎=PowerShell：watchdog.ps1）')) '启动器日志记了引擎：旁边没有 AttachLink.Watchdog.exe → 用 PowerShell 版'
 
     '=== D. 拉起策略 ==='
     Set-Content -LiteralPath (Join-Path $stage1 'exit7.flag') -Value 'x' -Encoding ASCII
@@ -223,8 +227,63 @@ Remember-Own @($pBad.Id)
 Check ($pBad.HasExited -and $pBad.ExitCode -eq 5) ('不认识的参数 → 退出码 5（实际 {0}）' -f $(if ($pBad.HasExited) { $pBad.ExitCode } else { 'n/a' }))
 Check (@(Get-Hb $stage3 0).Count -eq 0) '参数不对时没有启动看门狗'
 
+'=== H. 启动器拉起 .NET 看门狗（旁边有 AttachLink.Watchdog.exe 时优先；部署目录里不放 xlam，看门狗只会暂停，不碰任何宿主）==='
+$netWd = Join-Path (Split-Path -Parent $exe) 'AttachLink.Watchdog.exe'
+if (-not (Test-Path -LiteralPath $netWd)) {
+    Check $false ("找不到 {0}，先运行 build\\make-watchdog.ps1" -f $netWd)
+} else {
+    $stageH2 = Join-Path $base 'sN'
+    $lxN = New-Stage $stageH2 -WithoutScript -WithoutXlam
+    Copy-Item -LiteralPath $netWd -Destination (Join-Path $stageH2 'AttachLink.Watchdog.exe') -Force
+    $llN = Join-Path $stageH2 'launcher.log'
+    $clN = Join-Path $stageH2 'child.log'
+    $termN = @(Get-Process -Name WindowsTerminal -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    $LN = Start-Process -FilePath $lxN -ArgumentList ('-LogFile "{0}" -ChildLog "{1}" -RestartDelaySeconds 1' -f $llN, $clN) -WorkingDirectory $stageH2 -PassThru
+    Remember-Own @($LN.Id)
+    function Get-NetChildren { return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($LN.Id)" | Where-Object { $_.Name -eq 'AttachLink.Watchdog.exe' }) }
+    function Wait-NetChild([int]$NotPid, [int]$Seconds) {
+        $t0 = Get-Date
+        while (((Get-Date) - $t0).TotalSeconds -lt $Seconds) {
+            $c = @(Get-NetChildren | Where-Object { $_.ProcessId -ne $NotPid })
+            if ($c.Count -gt 0) { return $c[0] }
+            Start-Sleep -Milliseconds 250
+        }
+        return $null
+    }
+    $c1 = Wait-NetChild 0 15
+    if ($null -eq $c1) {
+        Check $false 'H 启动器拉起了 .NET 看门狗（15 秒内出现子进程）'
+    } else {
+        $childId1 = [int]$c1.ProcessId
+        Remember-Own @($childId1)
+        Start-Sleep -Seconds 2
+        Check ([string]$c1.CommandLine -like ('*-XlamPath "{0}*"' -f $stageH2)) ('H 子进程的命令行带 -XlamPath，指向部署目录里的 AttachLink.xlam（实际 [{0}]）' -f $c1.CommandLine)
+        $llNText = ''; if (Test-Path -LiteralPath $llN) { $llNText = [IO.File]::ReadAllText($llN, [Text.Encoding]::UTF8) }
+        Check ($llNText.Contains('启动器: 启动看门狗（引擎=.NET：AttachLink.Watchdog.exe）')) 'H 启动器日志记了引擎=.NET'
+        $clNLines = @(); if (Test-Path -LiteralPath $clN) { $clNLines = @([IO.File]::ReadAllLines($clN, [Text.Encoding]::UTF8)) }
+        Check (@($clNLines | Where-Object { $_ -match ('看门狗启动, pid=' + $childId1 + ', xlam=') }).Count -eq 1) 'H 看门狗的启动行与 PowerShell 版同一格式（「看门狗启动, pid=…, xlam=…」）'
+        Check (@($clNLines | Where-Object { $_ -match ('^.{14} xlam 不存在，暂停附着直至文件就位: ' + [regex]::Escape((Join-Path $stageH2 'AttachLink.xlam')) + '$') }).Count -ge 1) 'H 没有 xlam 时暂停附着，不碰任何宿主'
+        $winsN = Watch-Windows @($LN.Id, $childId1) 2
+        Check ($winsN.Count -eq 0) 'H 启动器与 .NET 看门狗名下没有可见窗口（2 秒）'
+        Check ((Get-NewTerminals $termN).Count -eq 0) 'H 没有拉起 Windows Terminal'
+        Stop-Process -Id $childId1 -Force -ErrorAction SilentlyContinue
+        $c2 = Wait-NetChild $childId1 15
+        if ($null -eq $c2) { Check $false 'H 看门狗被结束后启动器拉起了新的' } else {
+            Remember-Own @([int]$c2.ProcessId)
+            Check ([int]$c2.ProcessId -ne $childId1) ('H 看门狗被结束后 1 秒重启（新 pid={0}）' -f $c2.ProcessId)
+            Start-Sleep -Seconds 2
+            $llNText = [IO.File]::ReadAllText($llN, [Text.Encoding]::UTF8)
+            Check (([regex]::Matches($llNText, '看门狗已结束（退出码=-1，运行 \d+ 秒）')).Count -eq 1 -and $llNText.Contains('1 秒后重启看门狗（第 1/3 次）')) 'H 启动器日志：记了结束与第 1/3 次重启'
+            $clNLines = @([IO.File]::ReadAllLines($clN, [Text.Encoding]::UTF8))
+            Check (@($clNLines | Where-Object { $_ -match ('看门狗启动, pid=' + $c2.ProcessId + ',') }).Count -eq 1) 'H 新看门狗也记了启动行'
+            Stop-Process -Id $LN.Id -Force -ErrorAction SilentlyContinue
+            Check (Wait-Gone ([int]$c2.ProcessId) 8) 'H 结束启动器后 .NET 看门狗随之结束（作业对象）'
+        }
+    }
+}
+
 if ($WithTaskIntegration) {
-    '=== H. 计划任务真机段（按触发启动 + 1 分钟重复）==='
+    '=== I. 计划任务真机段（按触发启动 + 1 分钟重复）==='
     $stageH = Join-Path $base 'sH'
     $lxH = New-Stage $stageH
     $taskName = 'AttachLink Test Launcher ' + [guid]::NewGuid().ToString('N').Substring(0, 8)

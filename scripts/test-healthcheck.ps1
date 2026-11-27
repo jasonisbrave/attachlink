@@ -403,6 +403,24 @@ try {
     Check ($files1b[0].Message.Contains('AttachLink.WatchdogLauncher.exe')) 'G1b machine.files：必需文件清单含启动器 exe'
     Remove-Item "$machineDir\watchdog_launcher.vbs" -Force -ErrorAction SilentlyContinue
 
+    # --- 场景 1c：看门狗引擎形态（信息性）：部署目录有 AttachLink.Watchdog.exe → ok 且文案含「引擎=.NET」 ---
+    [IO.File]::WriteAllText("$machineDir\AttachLink.Watchdog.exe", 'dummy-net-watchdog', [Text.UTF8Encoding]::new($false))
+    $out1c = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $hcPath `
+        -LogPath $gLog -PayloadDir $payloadDir -OfficeRootKey $officeRoot `
+        -TaskName 'AttachLinkHealthTest-NoSuchTask' -MachineDir $machineDir)
+    $p1c = Parse-HcOutput $out1c
+    $files1c = @($p1c.Items | Where-Object { $_.Id -eq 'machine.files' } | Select-Object -First 1)
+    Check ($files1c.Count -eq 1 -and $files1c[0].Status -eq 'ok' -and $files1c[0].Message.Contains('引擎=.NET')) 'G1c machine.files：部署目录有 AttachLink.Watchdog.exe → ok 且文案含「引擎=.NET」'
+    Remove-Item "$machineDir\AttachLink.Watchdog.exe" -Force -ErrorAction SilentlyContinue
+
+    # --- 场景 1d：部署目录没有 AttachLink.Watchdog.exe → 仍 ok 且文案含「引擎=PowerShell」（回退形态，不算失败） ---
+    $out1d = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $hcPath `
+        -LogPath $gLog -PayloadDir $payloadDir -OfficeRootKey $officeRoot `
+        -TaskName 'AttachLinkHealthTest-NoSuchTask' -MachineDir $machineDir)
+    $p1d = Parse-HcOutput $out1d
+    $files1d = @($p1d.Items | Where-Object { $_.Id -eq 'machine.files' } | Select-Object -First 1)
+    Check ($files1d.Count -eq 1 -and $files1d[0].Status -eq 'ok' -and $files1d[0].Message.Contains('引擎=PowerShell')) 'G1d machine.files：部署目录没有 AttachLink.Watchdog.exe → 仍 ok 且文案含「引擎=PowerShell」（启动器回退形态）'
+
     # --- 场景 2：未部署机器级（无目录无任务）+ 用户级齐全 + 干净日志 → 机器级全 skip ---
     Remove-Item "$officeRoot\16.0\Excel\Options" -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -Path "$officeRoot\16.0\Excel\Options" -Force | Out-Null

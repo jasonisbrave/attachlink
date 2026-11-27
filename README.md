@@ -236,7 +236,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Uninstall  # 一键�
 | `README.md` | 用法说明 |
 | `dist\AttachLink.xlam` | 预构建安装包 |
 | `scripts\setup.ps1` | 安装编排 |
-| `scripts\watchdog.ps1`、`dist\AttachLink.WatchdogLauncher.exe`（由 `src\WatchdogLauncher.cs` 构建） | 看门狗与无窗口启动器（方式五部署时由 install-elevated 复制） |
+| `dist\AttachLink.Watchdog.exe`（由 `src\WatchdogNet\` 构建）、`dist\AttachLink.WatchdogLauncher.exe`（由 `src\WatchdogLauncher.cs` 构建）、`scripts\watchdog.ps1`（回退用） | 看门狗（v1.7.0 起为预编译的 .NET 程序）、无窗口启动器与 PowerShell 版回退（方式五部署时由 install-elevated 复制） |
 | `build\install.ps1`、`build\install-elevated.ps1` | 安装核心 / 机器级部署 |
 
 - 如需保留「缺产物时现场构建」（B 回退），再附 `build\build.ps1` + `src\AttachLink.bas` + `src\AttachLink.ThisWorkbook.vba`；纯接收版可不带源码（缺 dist 会直接提示包不完整）
@@ -269,10 +269,11 @@ powershell -ExecutionPolicy Bypass -File build\install-elevated.ps1 -Uninstall
 
 部署内容：
 
-- xlam + 看门狗 + 无窗口启动器（`AttachLink.WatchdogLauncher.exe`）复制到 `C:\Program Files\AttachLink\`（部署时顺带清掉旧版留下的 `watchdog_launcher.vbs`）
+- xlam + 看门狗（`AttachLink.Watchdog.exe`，预编译的 .NET 程序；`watchdog.ps1` 一并部署，只作回退）+ 无窗口启动器（`AttachLink.WatchdogLauncher.exe`）复制到 `C:\Program Files\AttachLink\`（部署时顺带清掉旧版留下的 `watchdog_launcher.vbs`）
 - HKLM 受信任位置指向该目录
 - 注册计划任务（最高权限，动作直接是无窗口启动器——没有控制台窗口）。任务带两个触发器：登录即启动；另有一个时间触发器每 5 分钟重复，作为兜底——任务不在运行时（启动器被结束，或它放弃之后），下一次重复会重新启动
 - 看门狗异常退出（非 0）后由启动器 10 秒后拉起；连续 3 次没能稳定运行（每次不足 60 秒）才放弃——启动器以看门狗的退出码结束，该值成为计划任务的上次运行结果，其动作写进看门狗日志（「启动器:」开头的行）
+- 启动器旁边有 `AttachLink.Watchdog.exe` 就用它；需要退回 PowerShell 版时，以管理员运行 `build\install-elevated.ps1 -LegacyPowerShell`（不再部署 .NET 看门狗，并删掉机器级目录里已有的那一份）
 
 之后鼎信诺打开底稿约 2~4 秒内右键菜单自动出现。看门狗日志：`%TEMP%\AttachLinkWatchdog.log`（装载成功行带 xlam 版本号，便于核对两级同版；周期行只在 EXCEL7 窗口数变化或每 30 秒心跳时记录）。
 
@@ -432,11 +433,11 @@ v1.5.0 起安装器提供「检查更新」与「一键更新」。安装器右�
 
 **根因（本机逐项实测，详见 WORKLOG）**：鼎信诺通过 `CreateObject` 拉起 Excel 时，Excel 跳过 `.xlam`（OPEN 注册）、`XLSTART`、COM 加载项 `OnConnection` **三条自动初始化路径**；`AddIns` 集合中 `Installed=True` 只反映登记状态、不代表已装载。因此装载必须来自 Excel 进程**外部**。
 
-**看门狗机制**（`scripts\watchdog.ps1`，微软文档化的 Office Native OM 附着通道，不依赖 ROT、不注入）：
+**看门狗机制**（v1.7.0 起是预编译的 .NET 程序 `AttachLink.Watchdog.exe`，源码在 `src\WatchdogNet\`；`scripts\watchdog.ps1` 留作回退。微软文档化的 Office Native OM 附着通道，不依赖 ROT、不注入）：
 
 ```text
 普通双击打开的 Excel ──► xlam 经 OPEN 注册自动装载（原有机制，正常工作）
-鼎信诺拉起的 Excel   ──► 看门狗（外部 PowerShell 常驻）检测 EXCEL7 文档窗口
+鼎信诺拉起的 Excel   ──► 看门狗（外部常驻进程）检测 EXCEL7 文档窗口
                           └► 宿主校验：窗口所属进程必须是 EXCEL.EXE，否则跳过
                           │   （WPS 表格复用同样的窗口类名，绝不能被当成 Excel）
                           └► AccessibleObjectFromWindow 取 Application
@@ -457,6 +458,8 @@ v1.6.0 起看门狗**只装载、不登记**：不再把 Program Files 副本登
 v1.6.1 起看门狗有两处加固。① **附着失败按窗口退避**：宿主正忙（被呼叫方拒绝接收呼叫）时，同一个文档窗口按 2、4、8、16 秒退避，封顶 30 秒，期间不再打扰它，别的窗口照常处理，成功一次即恢复；此前是固定等 0.8 秒后每个周期重试。② **装载成功的判定从严**：初始化宏执行成功、右键菜单在位、版本宏可读，三项齐备才记「已装载并初始化」；缺任何一项都不算完成，日志记「装载后未能确认初始化…」并按上面的退避重试。宏名也限定到工作簿（`'AttachLink.xlam'!宏名`）。
 
 v1.6.4 起加载项改了初始化方式：加载项自己不再带 `Workbook_Open`，也不再处理「打开工作簿」事件。双击打开 Excel 时由 `Auto_Open` 初始化；被看门狗装进别的程序拉起的 Excel 时，由上面那一步显式初始化。这样做的原因是：这两类「打开」事件的处理一执行，Excel 就会把宿主的「警告显示」「屏幕刷新」复位成开启——不只装载那一刻，之后每打开一本工作簿都会再来一次（v1.6.0 的写回只管住了装载那一刻）。改完之后，AttachLink 装进别的程序拉起的 Excel，对方关掉的提示不会再被重新打开。右键菜单的自愈只剩右键那一条（右键的瞬间补回），保存前的链接归一化不变；看门狗那一步写回保留作兜底。
+
+v1.7.0 起看门狗本体换成了预编译的 .NET 程序 `AttachLink.Watchdog.exe`，不再运行 PowerShell 脚本。判定规则、装载流程、日志文件与措辞都与之前的 PowerShell 版逐项等价（同一批 Excel 实例上对照过），健康检查不用改判定；新增的是日志大小上限（2 MB，超过时转成一份 `AttachLinkWatchdog.prev.log`）。它依赖 .NET Framework 4.8（Windows 10 1903 以后与 Windows 11 自带），由构建脚本在本机编译，安装器打包的是编译好的产物。计划任务的直接动作仍是启动器：它旁边有 `AttachLink.Watchdog.exe` 就用它，否则退回 PowerShell 版。
 
 v1.6.2 起，看门狗**只附着用户看得见的会话**：Excel 整体不可见的隐藏实例不再被装载，变可见之后才处理。日常使用没有变化——在鼎信诺里打开底稿时窗口是可见的，菜单照常在几秒内出现；自己双击打开的 Excel 仍由登记装载。变的是后台：各类工具、脚本在后台驱动的隐藏 Excel，以及鼎信诺归档时另起的那个隐藏 Excel，看门狗都不再往里装东西。日志里会看到「隐藏实例，暂不附着（等它可见）」，这是预期行为。
 
@@ -481,7 +484,7 @@ v1.6.2 起，看门狗**只附着用户看得见的会话**：Excel 整体不可
 | `HOTKEY_INSERT` | `"^+a"` | 插入附件链接快捷键（`""` = 禁用） |
 | `HOTKEY_INDEX` | `"^+k"` | 附件清单快捷键 |
 | `INDEX_SHEET_NAME` | `"附件清单"` | 清单工作表名 |
-| `ATTACHLINK_VERSION` | `"1.6.4"` | 版本号（单一事实源：安装器标题/自检、两级部署哈希核对均引用） |
+| `ATTACHLINK_VERSION` | `"1.7.0"` | 版本号（单一事实源：安装器标题/自检、两级部署哈希核对均引用） |
 
 ## 常见问题
 
@@ -499,6 +502,7 @@ v1.6.2 起，看门狗**只附着用户看得见的会话**：Excel 整体不可
 - 编制端（加载项功能）支持 Windows 桌面版 Excel 与 WPS 表格（v1.3.0 起，需 VBA 环境）；编制端不支持 Mac/网页版。归档件查看（点链接）不受限——任何表格软件均可打开归档件并点击普通超链接
 - 未装 VBA 环境的 WPS 表格里没有 AttachLink 菜单（属 WPS 宿主限制，非缺陷）；此时与 Excel 共存的机器上 Excel 侧功能完整，WPS 不受看门狗影响（v1.4.3 起）
 - 宏被全面禁用且无法配置受信任位置的环境不适用
+- **看门狗（v1.7.0 起）依赖 .NET Framework 4.8**：Windows 10 1903 以后与 Windows 11 自带，不用另装；更老的系统上 .NET 看门狗起不来，启动器连续 3 次后会放弃，这时请以管理员运行 `build\install-elevated.ps1 -LegacyPowerShell` 退回 PowerShell 版
 - **安装器 exe 未做 Authenticode 代码签名**：更新清单（latest.json）已带发布私钥签名、安装器内置公钥验签（见上方「检查更新与一键更新」的信任模型），镜像作恶或被篡改无法伪造清单；但 exe 本身的信任锚仍是 GitHub Release 渠道本身，代码签名属后续事项。新版本安装器首次运行可能出现 SmartScreen 提示（见上方引导）
 - **体检取消（Esc）与保存后的状态栏提醒依赖 Excel 的状态栏 / OnTime 机制**：WPS 下若不支持则静默跳过，功能本身不受影响
 
@@ -516,7 +520,7 @@ excel-attach-addin/
 │   ├── AttachLink.bas               # 主模块源码（全部功能 + 顶部配置区）
 │   ├── AttachLink.ThisWorkbook.vba  # ThisWorkbook 事件代码（保存时链接归一化）
 │   ├── WatchdogLauncher.cs           # 无窗口启动器源码（构建为 dist\AttachLink.WatchdogLauncher.exe，计划任务的直接动作）
-│   ├── WatchdogNet/                 # .NET 看门狗源码（预研基础第 5 步；目前有只读诊断 --diag、手动装载 --once 与内置回归 --selftest，由 build\make-watchdog.ps1 构建为 dist\AttachLink.Watchdog.exe，尚未部署）
+│   ├── WatchdogNet/                 # .NET 看门狗源码（v1.7.0 起的常驻看门狗；--diag 只读诊断、--once 手动装载、--selftest 内置回归；由 build\make-watchdog.ps1 构建为 dist\AttachLink.Watchdog.exe）
 │   └── AttachLinkShim.cs            # 📦 归档：已废弃的 COM 引导器路线，不再编译
 ├── build/
 │   ├── build.ps1                    # 构建 → dist/AttachLink.xlam
@@ -536,7 +540,7 @@ excel-attach-addin/
 │   └── elevated-capture.ps1         # 提权侧输出捕获包装器
 ├── scripts/
 │   ├── setup.ps1                    # 安装/卸载编排（备用命令行入口，见方式二）
-│   ├── watchdog.ps1                 # 外部看门狗：为自动化拉起的 Excel 装载 xlam（仅附着 EXCEL.EXE）
+│   ├── watchdog.ps1                 # 看门狗的 PowerShell 版：v1.7.0 起只作回退（部署时带 -LegacyPowerShell 才会被启动器使用）
 │   │                                #   ⚠ 必须保存为 UTF-8 with BOM（PS5.1 按 ANSI 误读
 │   │                                #     无 BOM 文件，中文注释乱码可吞换行破坏 C# 编译）
 │   ├── test-chain.ps1               # 全链路回归测试（自动化拉起 Excel × 看门狗；含关后即退与预热生命周期检查，期望 RESULT: PASS）

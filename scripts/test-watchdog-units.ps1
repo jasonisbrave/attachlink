@@ -25,6 +25,7 @@
 # I. 隐藏实例不附着（真实 Excel，隐藏实例）：被测看门狗不带回归开关（产品规则），隐藏实例只被记「暂不附着」、
 #    不装载（实例里取不到加载项）；设为可见后记「已可见，开始处理」并照常装载。
 # 用法：powershell -ExecutionPolicy Bypass -File test-watchdog-units.ps1      期望末行 RESULT: PASS
+#       换 .NET 版被测看门狗：powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-watchdog-units.ps1 -WatchdogExe dist\AttachLink.Watchdog.exe
 # 需要：桌面版 Excel（B、E、I 段用真实实例；B、E 段的实例是隐藏的，不弹窗口）。v1.6.2 起被测看门狗带
 #       -AttachHiddenInstances，B、E 段的隐藏实例由此照旧被装载（I 段专门用不带开关的被测看门狗验产品规则）。
 #       本机常驻看门狗若与被测脚本版本不一致，B、E、I 段整段跳过（它会对同一实例做自己的动作，结果无法归因）。
@@ -35,9 +36,17 @@
 # =====================================================================
 # 可选参数：-AssumeSameVersion  跳过「常驻看门狗与被测脚本同版」的检查（仅在本机常驻看门狗已暂停、要单独验证
 #           工作区版本时使用；常驻看门狗在运行时不要加，它会对同一实例做自己的动作，结果无法归因）。
-param([switch]$AssumeSameVersion)
+#           -WatchdogExe <路径>  用该可执行文件当被测看门狗（相对路径按仓库根解析；给 dist\AttachLink.Watchdog.exe
+#           即换 .NET 版，日志措辞与 PowerShell 版逐项等价，仅少「Add-Type 完成」一行；读 watchdog.ps1 源码的
+#           静态断言照常执行）。不给就是原来的 PowerShell 版。
+param([switch]$AssumeSameVersion, [string]$WatchdogExe = '')
 $ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+# -WatchdogExe：相对路径按仓库根（scripts 的上一级）解析；文件不存在直接失败，不让测试带着空开关跑。
+if ($WatchdogExe) {
+    if (-not [IO.Path]::IsPathRooted($WatchdogExe)) { $WatchdogExe = Join-Path (Split-Path -Parent $PSScriptRoot) $WatchdogExe }
+    if (-not (Test-Path $WatchdogExe)) { throw "未找到被测看门狗可执行文件：$WatchdogExe" }
+}
 
 $repo = Split-Path -Parent $PSScriptRoot
 $wdPath = Join-Path $PSScriptRoot 'watchdog.ps1'
@@ -881,7 +890,11 @@ if (-not (Test-Path $trusted)) { $trusted = Join-Path $env:APPDATA 'Microsoft\Ad
 function Start-TestWatchdog([string]$Log) {
     # v1.6.2 起被测看门狗带 -AttachHiddenInstances（回归开关，回到旧规则）：B、E 段用隐藏实例模拟
     # 「鼎信诺拉起的 Excel」，常驻规则（不带开关）下它们不再被装载。产品部署不带这个开关。
-    return (Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $Log), '-XlamPath', ('"{0}"' -f $trusted), '-AttachHiddenInstances') -PassThru -WindowStyle Hidden)
+    # 给了 -WatchdogExe 就启动 .NET 版被测看门狗（参数名与 PowerShell 版相同）；否则启动原 PowerShell 版。
+    # 日志路径、xlam 路径、-AttachHiddenInstances 与原写法逐字保持一致。
+    $wdArgs = @('-LogFile', ('"{0}"' -f $Log), '-XlamPath', ('"{0}"' -f $trusted), '-AttachHiddenInstances')
+    if ($WatchdogExe) { return (Start-Process -FilePath $WatchdogExe -ArgumentList $wdArgs -PassThru -WindowStyle Hidden) }
+    return (Start-Process powershell -ArgumentList (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath)) + $wdArgs) -PassThru -WindowStyle Hidden)
 }
 function Get-WdLogLines([string]$Log) {
     # 用「允许读写共享」的方式读：被测看门狗正往日志追加的那一瞬间，按只读共享打开会撞上
@@ -1158,8 +1171,13 @@ if ($deployedDiffers) {
     $xl = $null; $wbs = $null
     $log = Join-Path $base 'wd-i.log'
     try {
-        # 被测看门狗不带 -AttachHiddenInstances（产品部署形态），独立日志，与其他段同一份可信副本
-        $wdI = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $log), '-XlamPath', ('"{0}"' -f $trusted)) -PassThru -WindowStyle Hidden
+        # 被测看门狗不带 -AttachHiddenInstances（产品部署形态），独立日志，与其他段同一份可信副本。
+        # 给了 -WatchdogExe 就启动 .NET 版被测看门狗（参数名与 PowerShell 版相同）；否则启动原 PowerShell 版。
+        if ($WatchdogExe) {
+            $wdI = Start-Process -FilePath $WatchdogExe -ArgumentList @('-LogFile', ('"{0}"' -f $log), '-XlamPath', ('"{0}"' -f $trusted)) -PassThru -WindowStyle Hidden
+        } else {
+            $wdI = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $wdPath), '-LogFile', ('"{0}"' -f $log), '-XlamPath', ('"{0}"' -f $trusted)) -PassThru -WindowStyle Hidden
+        }
         $xl = New-Object -ComObject Excel.Application           # 隐藏实例：不弹窗口
         [void][AttachLinkUnitsPid]::GetWindowThreadProcessId([IntPtr][long]$xl.Hwnd, [ref]$testPidI)
         $wbs = $xl.Workbooks
